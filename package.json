@@ -1,0 +1,37 @@
+{
+  "name": "promptcraft-api",
+  "version": "1.0.0",
+  "description": "PromptCraft API Server - Express backend for authentication, templates, contexts, and teams",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "echo \"Tests coming soon\" && exit 0"
+  },
+  "keywords": [
+    "promptcraft",
+    "api",
+    "express",
+    "backend"
+  ],
+  "author": "PromptCraft Team",
+  "license": "MIT",
+  "dependencies": {
+    "@promptcraft/shared": "github:3bdrahman/promptcraft-shared",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "pg": "^8.11.3",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^3.0.2",
+    "resend": "^6.2.2",
+    "openai": "^4.20.0",
+    "@anthropic-ai/sdk": "^0.9.0",
+    "@google/generative-ai": "^0.1.3",
+    "@huggingface/inference": "^2.6.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
