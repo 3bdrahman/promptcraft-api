@@ -3,9 +3,9 @@
  * Generate embeddings for semantic search
  */
 
-import { AI_PROVIDERS, PROVIDER_CONFIGS } from '../_lib/ai/config.js';
-import { generateOpenAIEmbedding } from '../_lib/ai/providers/openai.js';
-import { generateHuggingFaceEmbedding } from '../_lib/ai/providers/huggingface.js';
+import { AI_PROVIDERS, PROVIDER_CONFIGS } from '../../../services/ai/config.js';
+import { generateOpenAIEmbedding } from '../../../services/ai/providers/openai.js';
+import { generateHuggingFaceEmbedding } from '../../../services/ai/providers/huggingface.js';
 
 // CORS headers
 const corsHeaders = {
