@@ -1,32 +1,67 @@
 # PromptCraft API
 
-**Express backend for PromptCraft - handles authentication, templates, contexts, teams, and AI integrations.**
+Express.js backend for PromptCraft - handles authentication, templates, contexts, teams, and AI integrations.
+
+## Architecture
+
+```
+┌─────────────────────┐
+│  craft-site         │  ← React Web App (Port 3000)
+│  (Frontend)         │     Development proxy: /api → :3001/api
+└──────────┬──────────┘
+           │ HTTP/REST
+           ↓
+┌─────────────────────┐
+│  promptcraft-api    │  ← Express API Server (Port 3001)
+│  (Backend)          │     app.use('/api', router)
+└──────────┬──────────┘
+           │
+           ↓
+   PostgreSQL Database
+    (Neon/Supabase)
+```
 
 ## Quick Start
+
+### Prerequisites
+
+- **Node.js 16+** and **npm 7+**
+- **PostgreSQL database** (Neon, Supabase, or local)
+- **Resend API key** for email invitations (optional)
 
 ### 1. Install Dependencies
 
 ```bash
+cd promptcraft-api
 npm install
 ```
 
 ### 2. Configure Environment
 
+Create `.env` file in project root:
+
 ```bash
-cp .env.example .env
-# Edit .env with your database credentials and API keys
+PORT=3001
+NODE_ENV=development
+
+# Database (Required)
+DATABASE_URL=postgresql://user:password@host:5432/database?sslmode=require
+
+# JWT Secrets (Required)
+JWT_SECRET=your-secret-key-here
+JWT_REFRESH_SECRET=your-refresh-secret-here
+
+# Email Service (Required for invitations)
+RESEND_API_KEY=re_xxxxxxxxxxxxx
+
+# CORS Configuration
+ALLOWED_ORIGINS=http://localhost:3000,chrome-extension://
+
+# AI Services (Optional - for Prompt Lab features)
+OPENAI_API_KEY=sk-xxxxxxxxxxxxx
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxx
+HUGGINGFACE_API_KEY=hf_xxxxxxxxxxxxx
 ```
-
-Required environment variables:
-- `DATABASE_URL` - PostgreSQL connection string
-- `JWT_SECRET` - Secret for access tokens
-- `JWT_REFRESH_SECRET` - Secret for refresh tokens
-- `RESEND_API_KEY` - For email invitations
-
-Optional (for AI features):
-- `OPENAI_API_KEY`
-- `HUGGINGFACE_API_KEY`
-- `ANTHROPIC_API_KEY`
 
 ### 3. Run Development Server
 
@@ -36,7 +71,14 @@ npm run dev
 
 Server starts at: **http://localhost:3001**
 
-### 4. Test API
+You should see:
+```
+🚀 PromptCraft API Server running on http://localhost:3001
+🌍 Environment: development
+📊 Database connected
+```
+
+### 4. Verify API is Running
 
 ```bash
 curl http://localhost:3001/health
@@ -45,9 +87,12 @@ curl http://localhost:3001/health
 Should return:
 ```json
 {
-  "status": "ok",
-  "timestamp": "...",
-  "environment": "development"
+  "success": true,
+  "data": {
+    "status": "ok",
+    "timestamp": "2024-11-10T...",
+    "environment": "development"
+  }
 }
 ```
 
@@ -84,48 +129,227 @@ promptcraft-api/
 
 ---
 
+## Tech Stack
+
+- **Express 4.18** - Web framework
+- **PostgreSQL** - Primary database (via Neon/Supabase)
+- **JWT** - Authentication (jsonwebtoken)
+- **Bcrypt** - Password hashing
+- **Resend** - Email service for invitations
+- **Axios** - HTTP client for AI providers
+- **CORS** - Cross-origin resource sharing
+- **Nodemon** - Development auto-reload
+
 ## API Endpoints
 
-### Authentication
+All endpoints are prefixed with `/api` in production and development.
+
+### Authentication (`/api/auth`)
 - `POST /api/auth/signup` - Register new user
+  - Body: `{ email, password, name }`
+  - Returns: User object
 - `POST /api/auth/verify-pin` - Verify email with PIN
-- `POST /api/auth/login` - Login
+  - Body: `{ email, pin }`
+  - Returns: `{ accessToken, refreshToken, user }`
+- `POST /api/auth/login` - Login with email/password
+  - Body: `{ email, password }`
+  - Returns: `{ accessToken, refreshToken, user }`
 - `POST /api/auth/refresh` - Refresh access token
-- `POST /api/auth/logout` - Logout
+  - Body: `{ refreshToken }`
+  - Returns: `{ accessToken }`
+- `POST /api/auth/logout` - Logout (invalidate refresh token)
+  - Headers: `Authorization: Bearer <token>`
 
-### Templates
-- `GET /api/templates` - List user templates
-- `POST /api/templates` - Create template
+### Templates (`/api/templates`)
+- `GET /api/templates` - List user's templates with filters
+  - Query params: `category`, `tags`, `search`, `sort`, `limit`, `offset`
+  - Returns: Array of templates
+- `GET /api/templates/:id` - Get single template
+  - Returns: Template object
+- `POST /api/templates` - Create new template
+  - Body: `{ name, description, content, category, tags, variables }`
+  - Returns: Created template
 - `PUT /api/templates/:id` - Update template
-- `DELETE /api/templates/:id` - Delete template
+  - Body: Partial template fields
+  - Returns: Updated template
+- `DELETE /api/templates/:id` - Soft delete template
+  - Returns: `{ deleted: true }`
+- `POST /api/templates/:id/use` - Track template usage
+  - Returns: Updated usage count
+- `POST /api/templates/:id/favorite` - Toggle favorite
+  - Returns: Updated favorite status
 
-### Contexts
-- `GET /api/contexts/layers` - List context layers
-- `POST /api/contexts/layers` - Create layer
+### Context Layers (`/api/contexts/layers`)
+- `GET /api/contexts/layers` - List context layers with filters
+  - Query params: `type`, `tags`, `visibility`, `search`, `sort`, `limit`, `offset`
+  - Layer types: `profile`, `project`, `task`, `snippet`, `adhoc`
+  - Returns: Array of layers
+- `GET /api/contexts/layers/search` - Search layers
+  - Query params: `q`, `limit`
+  - Returns: `{ layers: [...] }`
+- `GET /api/contexts/layers/:id` - Get single layer
+  - Returns: `{ layer: {...} }`
+- `POST /api/contexts/layers` - Create new layer
+  - Body: `{ name, description, content, layer_type, tags, metadata }`
+  - Returns: `{ layer: {...} }`
 - `PUT /api/contexts/layers/:id` - Update layer
-- `DELETE /api/contexts/layers/:id` - Delete layer
+  - Body: Partial layer fields
+  - Returns: `{ layer: {...} }`
+- `DELETE /api/contexts/layers/:id` - Soft delete layer
+  - Returns: `{ id, name, deleted: true }`
+- `POST /api/contexts/layers/:id/use` - Track layer usage
+  - Returns: `{ id, usage_count }`
+- `POST /api/contexts/layers/:id/rating` - Rate layer
+  - Body: `{ rating }` (1-5)
+  - Returns: `{ id, avg_rating, favorite_count }`
 
-### Teams
+### Teams (`/api/teams`)
 - `GET /api/teams` - List user's teams
-- `POST /api/teams` - Create team
-- `POST /api/teams/:id/invitations` - Invite member
+  - Returns: Array of teams with role info
+- `GET /api/teams/:id` - Get team details
+  - Returns: Team object
+- `POST /api/teams` - Create new team
+  - Body: `{ name, description }`
+  - Returns: Created team
+- `PUT /api/teams/:id` - Update team
+  - Body: `{ name, description }`
+  - Returns: Updated team
+- `DELETE /api/teams/:id` - Delete team
+  - Returns: `{ deleted: true }`
 - `GET /api/teams/:id/members` - List team members
+  - Returns: Array of members with roles
+- `POST /api/teams/:id/invitations` - Invite member to team
+  - Body: `{ email, role }` (role: owner, admin, member)
+  - Returns: Invitation object
+- `DELETE /api/teams/:id/members/:userId` - Remove team member
+  - Returns: `{ removed: true }`
 
-### AI (Prompt Lab)
-- `POST /api/ai/generate` - Generate AI response
-- `POST /api/ai/embeddings` - Generate embeddings
-- `GET /api/ai/providers` - List available providers
+### AI / Prompt Lab (`/api/ai`)
+- `POST /api/ai/generate` - Generate AI completion
+  - Body: `{ provider, model, prompt, parameters }`
+  - Providers: `openai`, `anthropic`, `huggingface`, `ollama`
+  - Returns: AI response
+- `POST /api/ai/embeddings` - Generate text embeddings
+  - Body: `{ provider, model, text }`
+  - Returns: Embedding vector
+- `GET /api/ai/providers` - List available AI providers
+  - Returns: `{ providers: [...] }` with status
+
+### Utility
+- `GET /health` - Health check endpoint
+  - Returns: `{ status: "ok", timestamp, environment }`
+- `GET /api` - List all available endpoints
+  - Returns: Array of endpoint info
+
+---
+
+## Routing Architecture
+
+### Express Path Stripping Behavior
+
+Understanding how Express handles route matching is critical for development:
+
+**Route Registration** (in `src/routes/index.js`):
+```javascript
+// Main app strips /api prefix
+app.use('/api', router);
+
+// Router registers handlers with additional prefixes
+router.use('/templates', asyncHandler(templatesHandler));
+router.use('/contexts/layers', asyncHandler(layersHandler));
+router.use('/teams', asyncHandler(teamsHandler));
+```
+
+**Path Stripping Cascade**:
+```
+Client Request: GET /api/contexts/layers?type=profile
+        ↓
+Express receives: GET /api/contexts/layers
+        ↓ (app.use('/api', router) strips /api)
+Router receives: GET /contexts/layers
+        ↓ (router.use('/contexts/layers', handler) strips /contexts/layers)
+Handler receives: GET /
+        ↓
+Handler checks: pathParts.length === 0 ✓ (list endpoint)
+```
+
+**Key Points**:
+- `app.use('/prefix', handler)` **strips** the prefix before passing to handler
+- Use `router.use()` not `router.all()` for nested routes
+- The wildcard `*` in `router.all('/path*')` doesn't match `/` characters
+- Handlers only see the **remaining path** after all prefix stripping
+
+### Handler Path Matching Pattern
+
+Example from `src/routes/handlers/layers.js`:
+
+```javascript
+export default async function handler(req, res) {
+  const { method, url } = req;
+
+  // Parse URL - handler sees only path AFTER /api/contexts/layers is stripped
+  const urlObj = new URL(url, `https://${req.headers.host || 'localhost'}`);
+  const pathParts = urlObj.pathname.split('/').filter(Boolean);
+
+  // GET / - List layers (pathParts.length === 0)
+  if (method === 'GET' && pathParts.length === 0) {
+    // Handle: GET /api/contexts/layers
+  }
+
+  // GET /search - Search layers (pathParts[0] === 'search')
+  if (method === 'GET' && pathParts.length === 1 && pathParts[0] === 'search') {
+    // Handle: GET /api/contexts/layers/search
+  }
+
+  // GET /:id - Get single layer (pathParts.length === 1)
+  if (method === 'GET' && pathParts.length === 1 && pathParts[0] !== 'search') {
+    const layerId = pathParts[0];
+    // Handle: GET /api/contexts/layers/:id
+  }
+
+  // POST /:id/use - Track usage (pathParts.length === 2)
+  if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'use') {
+    const layerId = pathParts[0];
+    // Handle: POST /api/contexts/layers/:id/use
+  }
+}
+```
+
+### CORS Configuration
+
+**Development**: Frontend proxy handles CORS (see craft-site/setupProxy.js)
+
+**Production**: Server handles CORS directly:
+```javascript
+// src/server.js
+app.use(cors({
+  origin: (origin, callback) => {
+    const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [];
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true
+}));
+```
+
+Set `ALLOWED_ORIGINS` in .env:
+```bash
+ALLOWED_ORIGINS=https://app.promptcraft.com,chrome-extension://your-extension-id
+```
 
 ---
 
 ## Development
 
-### Scripts
+### Available Scripts
 
 ```bash
 npm start       # Production server
-npm run dev     # Development with nodemon
-npm test        # Run tests
+npm run dev     # Development with nodemon (auto-restart on file changes)
+npm test        # Run tests (when implemented)
 ```
 
 ### Testing Endpoints
@@ -248,37 +472,178 @@ All endpoints remain the same - just change the base URL from Vercel to your ser
 
 ## Troubleshooting
 
-### Port Already in Use
+### Port 3001 Already in Use
 
+**Symptoms**: Error `EADDRINUSE :::3001` when starting server
+
+**Solutions**:
 ```bash
-# Find process using port 3001
+# Option 1: Kill port (Windows)
+npx kill-port 3001
+
+# Option 2: Kill port (macOS/Linux)
 lsof -i :3001
-# Kill it
 kill -9 <PID>
+
+# Option 3: Use different port
+PORT=3002 npm run dev
 ```
+
+**Common causes**:
+- Previous server instance didn't shut down properly
+- Nodemon restart loop due to file changes
+- Another application using port 3001
+
+### 404 Not Found - "Route GET /path not found"
+
+**Recent Fix (November 2024)**: We resolved routing issues caused by incorrect path matching in handlers.
+
+**Symptoms**:
+- API returns 404 errors for valid endpoints
+- Error message: "Route GET /contexts/layers not found"
+- Frontend sees 404 in browser console
+
+**Root cause**:
+Handlers expected incorrect path lengths due to not accounting for Express prefix stripping.
+
+**How it was fixed**:
+1. Changed route registration from `router.all('/path*')` to `router.use('/path')`
+2. Updated handlers to check correct path lengths:
+   - List endpoint: `pathParts.length === 0` (not 2 or 3)
+   - Single item: `pathParts[0]` (not pathParts[2])
+3. Added proper path parsing in all handlers
+
+**If you encounter this**:
+1. Check `src/routes/index.js` uses `router.use()` not `router.all()`
+2. Verify handler path matching accounts for stripped prefixes
+3. Review "Routing Architecture" section above
+4. Check server logs for actual path received
 
 ### Database Connection Failed
 
-- Check DATABASE_URL is correct
-- Ensure database is accessible
-- Verify firewall rules
+**Symptoms**: Error connecting to PostgreSQL, server won't start
 
-### CORS Errors
+**Solutions**:
+- Verify `DATABASE_URL` in .env is correct
+- Test database connection: `psql <DATABASE_URL>`
+- Check database is accessible (firewall, VPN, etc.)
+- Ensure `?sslmode=require` is in connection string for cloud databases
+- Verify database user has correct permissions
 
-- Add your origin to ALLOWED_ORIGINS in .env
-- Check CORS configuration in server.js
+**Common issues**:
+- Neon/Supabase requires SSL: Add `?sslmode=require` to DATABASE_URL
+- Connection pooler vs direct connection - use pooler for better performance
+- IP allowlist - ensure your IP is allowed (or use `0.0.0.0/0` for testing)
+
+### CORS Errors in Browser
+
+**Symptoms**:
+- `Access to fetch at '...' has been blocked by CORS policy`
+- Frontend can't make requests to backend
+
+**Solutions for development**:
+- Ensure `ALLOWED_ORIGINS=http://localhost:3000` in .env
+- Restart backend server after changing .env
+- Check frontend proxy is configured (craft-site/setupProxy.js)
+- Clear browser cache and localStorage
+
+**Solutions for production**:
+- Add production domain to `ALLOWED_ORIGINS`
+- Example: `ALLOWED_ORIGINS=https://app.promptcraft.com,https://www.promptcraft.com`
+- Restart server after changing environment variables
+
+### Frontend 504 Gateway Timeout
+
+**Symptoms**: Frontend shows 504 errors when making API requests
+
+**Root cause**: Backend server not running
+
+**Solution**:
+1. Start backend: `cd promptcraft-api && npm run dev`
+2. Verify: `curl http://localhost:3001/health`
+3. Check backend is listening on correct port (3001)
+4. Ensure `REACT_APP_API_URL=http://localhost:3001` in frontend .env
+
+### Server Restart Loop
+
+**Symptoms**: Server keeps restarting infinitely with nodemon
+
+**Solutions**:
+1. Kill all node processes: `npx kill-port 3001`
+2. Check for syntax errors in recently edited files
+3. Verify no circular dependencies
+4. Check nodemon isn't watching `node_modules` or build files
+5. Clear nodemon cache: `rm -rf node_modules/.cache`
+
+### Authentication Errors
+
+**Symptoms**: 401 Unauthorized, token validation fails
+
+**Solutions**:
+- Verify `JWT_SECRET` is set in .env
+- Check token isn't expired (access tokens expire in 15min)
+- Use refresh token to get new access token
+- Clear localStorage in browser and login again
+- Ensure `Authorization: Bearer <token>` header is sent correctly
+
+### Email Invitations Not Sending
+
+**Symptoms**: Team invitations fail to send
+
+**Solutions**:
+- Verify `RESEND_API_KEY` is set in .env
+- Check Resend dashboard for API key status
+- Verify email domain is verified in Resend
+- Check server logs for Resend API errors
+- Test API key: `curl https://api.resend.com/emails -H "Authorization: Bearer $RESEND_API_KEY"`
+
+---
+
+## Recent Updates
+
+### November 2024 - Routing Architecture Fixes
+
+- ✅ Fixed 404 errors caused by incorrect path matching in handlers
+- ✅ Changed from `router.all('/path*')` to `router.use('/path')` for proper sub-routing
+- ✅ Updated all handlers to account for Express prefix stripping cascade
+- ✅ Fixed pathParts index access (pathParts[0] instead of pathParts[2])
+- ✅ Added comprehensive routing documentation
+- ✅ Improved error handling and logging
+- ✅ All endpoints now working correctly with frontend
+
+**Key architectural learning**: Express strips prefixes at each `app.use()` level. With `app.use('/api', router)` then `router.use('/contexts/layers', handler)`, the handler receives only the path after BOTH prefixes are stripped.
 
 ---
 
 ## Contributing
 
-1. Create feature branch
-2. Make changes
-3. Test locally
-4. Submit PR
+1. Fork the repository
+2. Create feature branch (`git checkout -b feature/amazing-feature`)
+3. Make changes and test locally
+4. Ensure all routes follow the documented path matching pattern
+5. Test with frontend (craft-site) if making API changes
+6. Commit changes (`git commit -m 'Add amazing feature'`)
+7. Push to branch (`git push origin feature/amazing-feature`)
+8. Open Pull Request
+
+---
+
+## License
+
+MIT License - see LICENSE file for details
+
+## Support
+
+**Issues**: Report bugs via GitHub Issues
+
+**Development Questions**: Check "Routing Architecture" section first
+
+**Database Issues**: Verify DATABASE_URL and check Neon/Supabase dashboard
+
+**Authentication**: Check JWT_SECRET is set and tokens aren't expired
 
 ---
 
 **Version:** 1.0.0
+**Node Version:** 16+
 **License:** MIT
-**Maintainers:** PromptCraft Team
