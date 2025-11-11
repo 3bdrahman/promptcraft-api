@@ -79,18 +79,19 @@ router.post('/user/auth-by-email', asyncHandler(authByEmailHandler));
 // ============================================
 // Templates Routes
 // ============================================
-router.all('/templates*', asyncHandler(templatesHandler));
+router.use('/templates', asyncHandler(templatesHandler));
 
 // ============================================
 // Context Routes
 // ============================================
-router.all('/contexts/layers*', asyncHandler(layersHandler));
-router.all('/contexts/profiles*', asyncHandler(profilesHandler));
-router.all('/contexts/combinations*', asyncHandler(combinationsHandler));
-router.all('/contexts/snippets*', asyncHandler(snippetsHandler));
+router.use('/contexts/layers', asyncHandler(layersHandler));
+router.use('/contexts/profiles', asyncHandler(profilesHandler));
+router.use('/contexts/combinations', asyncHandler(combinationsHandler));
+router.use('/contexts/snippets', asyncHandler(snippetsHandler));
 
 // Advanced context routes (composition, relationships, versions, search)
-router.use('/contexts', contextsRouter);
+// TODO: Convert contextsRouter from Vercel function handler to Express router
+// router.use('/contexts', contextsRouter);
 
 // ============================================
 // Teams Routes

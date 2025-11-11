@@ -13,7 +13,11 @@ export default async function handler(req, res) {
 
   const { method, url } = req;
 
-  // Parse URL and query parameters properly for Vercel
+  // Parse URL and query parameters properly
+  // In Express with router.use('/contexts/layers', handler):
+  // - app.use('/api', router) strips /api
+  // - router.use('/contexts/layers', handler) strips /contexts/layers
+  // So the handler sees only the remaining path (e.g., "/" or "/:id")
   const urlObj = new URL(url, `https://${req.headers.host || 'localhost'}`);
   const pathParts = urlObj.pathname.split('/').filter(Boolean);
   const query = Object.fromEntries(urlObj.searchParams);
@@ -27,8 +31,8 @@ export default async function handler(req, res) {
       return res.status(401).json(error('Unauthorized', 401));
     }
 
-    // GET /api/contexts/layers - List layers with filters
-    if (method === 'GET' && pathParts.length === 3) {
+    // GET / - List layers with filters (router.use strips /contexts/layers prefix)
+    if (method === 'GET' && pathParts.length === 0) {
       const {
         type, // layer_type filter
         tags,
@@ -106,8 +110,8 @@ export default async function handler(req, res) {
       }
     }
 
-    // GET /api/contexts/layers/search - Search layers with query
-    if (method === 'GET' && pathParts.length === 4 && pathParts[3] === 'search') {
+    // GET /search - Search layers with query
+    if (method === 'GET' && pathParts.length === 1 && pathParts[0] === 'search') {
       const { q, limit = 10 } = req.query;
 
       if (!q || q.trim().length < 2) {
@@ -128,9 +132,9 @@ export default async function handler(req, res) {
       return res.json(success({ layers: result.rows }));
     }
 
-    // GET /api/contexts/layers/:id - Get single layer
-    if (method === 'GET' && pathParts.length === 4 && pathParts[3] !== 'search') {
-      const layerId = pathParts[3];
+    // GET /:id - Get single layer
+    if (method === 'GET' && pathParts.length === 1 && pathParts[0] !== 'search') {
+      const layerId = pathParts[0];
 
       const result = await db.query(
         `SELECT * FROM context_layers
@@ -145,8 +149,8 @@ export default async function handler(req, res) {
       return res.json(success({ layer: result.rows[0] }));
     }
 
-    // POST /api/contexts/layers - Create layer
-    if (method === 'POST' && pathParts.length === 3) {
+    // POST / - Create layer
+    if (method === 'POST' && pathParts.length === 0) {
       const {
         name,
         description,
@@ -193,9 +197,9 @@ export default async function handler(req, res) {
       return res.status(201).json(success({ layer: result.rows[0] }));
     }
 
-    // PUT /api/contexts/layers/:id - Update layer
-    if (method === 'PUT' && pathParts.length === 4) {
-      const layerId = pathParts[3];
+    // PUT /:id - Update layer
+    if (method === 'PUT' && pathParts.length === 1) {
+      const layerId = pathParts[0];
       const {
         name,
         description,
@@ -298,9 +302,9 @@ export default async function handler(req, res) {
       return res.json(success({ layer: result.rows[0] }));
     }
 
-    // DELETE /api/contexts/layers/:id - Soft delete layer
-    if (method === 'DELETE' && pathParts.length === 4) {
-      const layerId = pathParts[3];
+    // DELETE /:id - Soft delete layer
+    if (method === 'DELETE' && pathParts.length === 1) {
+      const layerId = pathParts[0];
 
       const result = await db.query(
         `UPDATE context_layers
@@ -321,9 +325,9 @@ export default async function handler(req, res) {
       }));
     }
 
-    // POST /api/contexts/layers/:id/use - Track usage
-    if (method === 'POST' && pathParts.length === 5 && pathParts[4] === 'use') {
-      const layerId = pathParts[3];
+    // POST /:id/use - Track usage
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'use') {
+      const layerId = pathParts[0];
 
       const result = await db.query(
         `UPDATE context_layers
@@ -341,9 +345,9 @@ export default async function handler(req, res) {
       return res.json(success(result.rows[0]));
     }
 
-    // POST /api/contexts/layers/:id/rating - Rate layer
-    if (method === 'POST' && pathParts.length === 5 && pathParts[4] === 'rating') {
-      const layerId = pathParts[3];
+    // POST /:id/rating - Rate layer
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'rating') {
+      const layerId = pathParts[0];
       const { rating } = req.body;
 
       if (!rating || rating < 1 || rating > 5) {

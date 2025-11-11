@@ -16,7 +16,8 @@ export default async function handler(req, res) {
 
   const { method, url } = req;
 
-  // Parse URL and query parameters properly for Vercel
+  // Parse URL and query parameters properly
+  // In Express, /api prefix is already stripped by app.use('/api', router)
   const urlObj = new URL(url, `https://${req.headers.host || 'localhost'}`);
   const urlWithoutQuery = urlObj.pathname;
   const query = Object.fromEntries(urlObj.searchParams);
@@ -25,51 +26,51 @@ export default async function handler(req, res) {
   req.query = { ...query, ...req.query };
 
   const pathParts = urlWithoutQuery.split('/').filter(Boolean);
-  
+
   try {
-    // GET /api/templates/schema - Debug: Show database schema
-    if (method === 'GET' && pathParts[2] === 'schema') {
+    // GET /templates/schema - Debug: Show database schema
+    if (method === 'GET' && pathParts[1] === 'schema') {
       return await getTableSchema(req, res);
     }
-    
-    // GET /api/templates - List all public templates
-    if (method === 'GET' && pathParts.length === 2) {
+
+    // GET /templates - List all public templates
+    if (method === 'GET' && pathParts.length === 1) {
       return await getTemplates(req, res);
     }
-    
-    // GET /api/templates/favorites - Get user's favorite templates
-    if (method === 'GET' && pathParts[2] === 'favorites') {
+
+    // GET /templates/favorites - Get user's favorite templates
+    if (method === 'GET' && pathParts[1] === 'favorites') {
       return await getUserFavorites(req, res);
     }
-    
-    // GET /api/templates/my-templates - Get user's private templates
-    if (method === 'GET' && pathParts[2] === 'my-templates') {
+
+    // GET /templates/my-templates - Get user's private templates
+    if (method === 'GET' && pathParts[1] === 'my-templates') {
       return await getUserTemplates(req, res);
     }
-    
-    // GET /api/templates/:id - Get single template
-    if (method === 'GET' && pathParts.length === 3 && !['favorites', 'my-templates'].includes(pathParts[2])) {
-      return await getTemplate(req, res, pathParts[2]);
+
+    // GET /templates/:id - Get single template
+    if (method === 'GET' && pathParts.length === 2 && !['favorites', 'my-templates', 'schema'].includes(pathParts[1])) {
+      return await getTemplate(req, res, pathParts[1]);
     }
-    
-    // POST /api/templates/:id/favorite - Toggle favorite status
-    if (method === 'POST' && pathParts.length === 4 && pathParts[3] === 'favorite') {
-      return await toggleFavorite(req, res, pathParts[2]);
+
+    // POST /templates/:id/favorite - Toggle favorite status
+    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'favorite') {
+      return await toggleFavorite(req, res, pathParts[1]);
     }
-    
-    // POST /api/templates - Create new template
-    if (method === 'POST' && pathParts.length === 2) {
+
+    // POST /templates - Create new template
+    if (method === 'POST' && pathParts.length === 1) {
       return await createTemplate(req, res);
     }
-    
-    // PUT /api/templates/:id - Update template
-    if (method === 'PUT' && pathParts.length === 3) {
-      return await updateTemplate(req, res, pathParts[2]);
+
+    // PUT /templates/:id - Update template
+    if (method === 'PUT' && pathParts.length === 2) {
+      return await updateTemplate(req, res, pathParts[1]);
     }
-    
-    // DELETE /api/templates/:id - Delete template
-    if (method === 'DELETE' && pathParts.length === 3) {
-      return await deleteTemplate(req, res, pathParts[2]);
+
+    // DELETE /templates/:id - Delete template
+    if (method === 'DELETE' && pathParts.length === 2) {
+      return await deleteTemplate(req, res, pathParts[1]);
     }
     
     return res.status(404).json(error('Endpoint not found', 404));
@@ -101,10 +102,16 @@ async function getTemplates(req, res) {
   let query = `
     SELECT t.*,
            u.username,
-           (SELECT COUNT(*) FROM user_favorites uf WHERE uf.template_id = t.id) as favorite_count,
-           ${userId ? `EXISTS(SELECT 1 FROM user_favorites uf WHERE uf.template_id = t.id AND uf.user_id = $1) as user_favorited` : 'false as user_favorited'}
+           COALESCE(fc.favorite_count, 0) as favorite_count,
+           ${userId ? `CASE WHEN uf.user_id IS NOT NULL THEN true ELSE false END as user_favorited` : 'false as user_favorited'}
     FROM templates t
     LEFT JOIN users u ON t.user_id = u.id
+    LEFT JOIN (
+      SELECT template_id, COUNT(*)::int as favorite_count
+      FROM user_favorites
+      GROUP BY template_id
+    ) fc ON fc.template_id = t.id
+    ${userId ? `LEFT JOIN user_favorites uf ON uf.template_id = t.id AND uf.user_id = $1` : ''}
     WHERE t.is_public = true
   `;
   
@@ -452,10 +459,15 @@ async function getUserTemplates(req, res) {
     const query = `
       SELECT t.*,
              u.username,
-             (SELECT COUNT(*) FROM user_favorites uf WHERE uf.template_id = t.id) as favorite_count,
+             COALESCE(uf.favorite_count, 0) as favorite_count,
              false as user_favorited
       FROM templates t
       JOIN users u ON t.user_id = u.id
+      LEFT JOIN (
+        SELECT template_id, COUNT(*)::int as favorite_count
+        FROM user_favorites
+        GROUP BY template_id
+      ) uf ON uf.template_id = t.id
       WHERE t.user_id = $1
       ORDER BY t.created_at DESC
       LIMIT $2 OFFSET $3
