@@ -48,8 +48,63 @@ export default async function handler(req, res) {
       return await getUserTemplates(req, res);
     }
 
+    // GET /templates/team/:teamId - Get team's shared templates
+    if (method === 'GET' && pathParts[1] === 'team' && pathParts.length === 3) {
+      return await getTeamTemplates(req, res, pathParts[2]);
+    }
+
+    // POST /templates/:id/share - Share template with team
+    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'share') {
+      return await shareTemplate(req, res, pathParts[1]);
+    }
+
+    // POST /templates/:id/unshare - Unshare template (make private)
+    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'unshare') {
+      return await unshareTemplate(req, res, pathParts[1]);
+    }
+
+    // GET /templates/:id/versions - Get version history
+    if (method === 'GET' && pathParts.length === 3 && pathParts[2] === 'versions') {
+      return await getTemplateVersions(req, res, pathParts[1]);
+    }
+
+    // GET /templates/:id/versions/:versionId - Get specific version
+    if (method === 'GET' && pathParts.length === 4 && pathParts[2] === 'versions') {
+      return await getTemplateVersion(req, res, pathParts[1], pathParts[3]);
+    }
+
+    // POST /templates/:id/revert/:versionId - Revert to version
+    if (method === 'POST' && pathParts.length === 4 && pathParts[2] === 'revert') {
+      return await revertTemplateVersion(req, res, pathParts[1], pathParts[3]);
+    }
+
+    // POST /templates/:id/versions - Create manual version snapshot
+    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'versions') {
+      return await createManualTemplateVersion(req, res, pathParts[1]);
+    }
+
+    // GET /templates/:id/dependencies - Get template dependencies
+    if (method === 'GET' && pathParts.length === 3 && pathParts[2] === 'dependencies') {
+      return await getTemplateDependencies(req, res, pathParts[1]);
+    }
+
+    // GET /templates/:id/dependents - Get what depends on this template
+    if (method === 'GET' && pathParts.length === 3 && pathParts[2] === 'dependents') {
+      return await getTemplateDependents(req, res, pathParts[1]);
+    }
+
+    // GET /templates/:id/suggested-contexts - Get suggested contexts for template
+    if (method === 'GET' && pathParts.length === 3 && pathParts[2] === 'suggested-contexts') {
+      return await getSuggestedContexts(req, res, pathParts[1]);
+    }
+
+    // POST /templates/:id/track-usage - Track template usage with context
+    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'track-usage') {
+      return await trackTemplateUsage(req, res, pathParts[1]);
+    }
+
     // GET /templates/:id - Get single template
-    if (method === 'GET' && pathParts.length === 2 && !['favorites', 'my-templates', 'schema'].includes(pathParts[1])) {
+    if (method === 'GET' && pathParts.length === 2 && !['favorites', 'my-templates', 'schema', 'team'].includes(pathParts[1])) {
       return await getTemplate(req, res, pathParts[1]);
     }
 
@@ -994,23 +1049,347 @@ function enrichWithHierarchy(template) {
   };
 }
 
+// Get team templates
+async function getTeamTemplates(req, res, teamId) {
+  const userId = await getUserId(req);
+
+  if (!userId) {
+    return res.status(401).json(error('Authentication required', 401));
+  }
+
+  try {
+    // Check if user has access to this team
+    const accessCheck = await db.query(
+      'SELECT user_has_team_access($1, $2) as has_access',
+      [userId, teamId]
+    );
+
+    if (!accessCheck.rows[0].has_access) {
+      return res.status(403).json(error('You do not have access to this team', 403));
+    }
+
+    // Get templates shared with this team
+    const query = `
+      SELECT t.*,
+             u.username,
+             COALESCE(fc.favorite_count, 0) as favorite_count,
+             CASE WHEN uf.user_id IS NOT NULL THEN true ELSE false END as user_favorited
+      FROM templates t
+      LEFT JOIN users u ON t.user_id = u.id
+      LEFT JOIN (
+        SELECT template_id, COUNT(*)::int as favorite_count
+        FROM user_favorites
+        GROUP BY template_id
+      ) fc ON fc.template_id = t.id
+      LEFT JOIN user_favorites uf ON uf.template_id = t.id AND uf.user_id = $1
+      WHERE t.team_id = $2 AND t.visibility = 'team' AND t.deleted_at IS NULL
+      ORDER BY t.updated_at DESC
+    `;
+
+    const result = await db.query(query, [userId, teamId]);
+
+    const templates = result.rows.map(row => {
+      const favoriteCount = parseInt(row.favorite_count) || 0;
+      return enrichWithHierarchy({
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        content: row.content,
+        category: row.category,
+        tags: row.tags,
+        is_public: row.is_public,
+        visibility: row.visibility,
+        team_id: row.team_id,
+        favorite_count: favoriteCount,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        username: row.username,
+        userInteractions: {
+          isFavorited: row.user_favorited,
+          isOwner: row.user_id === userId
+        },
+        engagement: {
+          favorites: favoriteCount
+        }
+      });
+    });
+
+    return res.json({
+      templates,
+      team_id: teamId,
+      count: templates.length
+    });
+
+  } catch (err) {
+    console.error('Error fetching team templates:', err);
+    return res.status(500).json(error('Failed to fetch team templates', 500));
+  }
+}
+
+// Share template with team
+async function shareTemplate(req, res, templateId) {
+  const user = await requireAuth(req, res);
+  if (!user) return;
+
+  const { team_id, visibility = 'team' } = req.body;
+
+  if (!team_id) {
+    return res.status(400).json(error('team_id is required', 400));
+  }
+
+  try {
+    // Use the database function to share
+    const result = await db.query(
+      'SELECT share_template_with_team($1, $2, $3) as success',
+      [templateId, team_id, user.id]
+    );
+
+    if (result.rows[0].success) {
+      // Get updated template
+      const templateResult = await db.query(
+        'SELECT * FROM templates WHERE id = $1',
+        [templateId]
+      );
+
+      return res.json(success(
+        enrichWithHierarchy(templateResult.rows[0]),
+        'Template shared with team successfully'
+      ));
+    }
+
+  } catch (err) {
+    console.error('Error sharing template:', err);
+    return res.status(500).json(error(err.message || 'Failed to share template', 500));
+  }
+}
+
+// Unshare template (make private)
+async function unshareTemplate(req, res, templateId) {
+  const user = await requireAuth(req, res);
+  if (!user) return;
+
+  try {
+    // Use the database function to unshare
+    const result = await db.query(
+      'SELECT unshare_template($1, $2) as success',
+      [templateId, user.id]
+    );
+
+    if (result.rows[0].success) {
+      // Get updated template
+      const templateResult = await db.query(
+        'SELECT * FROM templates WHERE id = $1',
+        [templateId]
+      );
+
+      return res.json(success(
+        enrichWithHierarchy(templateResult.rows[0]),
+        'Template is now private'
+      ));
+    }
+
+  } catch (err) {
+    console.error('Error unsharing template:', err);
+    return res.status(500).json(error(err.message || 'Failed to unshare template', 500));
+  }
+}
+
+// Get template version history
+async function getTemplateVersions(req, res, templateId) {
+  const user = await requireAuth(req, res);
+  if (!user) return;
+
+  try {
+    const result = await db.query(
+      'SELECT * FROM get_template_version_history($1, $2)',
+      [templateId, 50] // Get last 50 versions
+    );
+
+    return res.json(success({
+      template_id: templateId,
+      versions: result.rows,
+      total: result.rows.length
+    }));
+  } catch (err) {
+    console.error('Error fetching template versions:', err);
+    return res.status(500).json(error('Failed to fetch version history', 500));
+  }
+}
+
+// Get specific template version
+async function getTemplateVersion(req, res, templateId, versionId) {
+  const user = await requireAuth(req, res);
+  if (!user) return;
+
+  try {
+    const result = await db.query(
+      'SELECT * FROM template_versions WHERE id = $1 AND template_id = $2',
+      [versionId, templateId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json(error('Version not found', 404));
+    }
+
+    return res.json(success({ version: result.rows[0] }));
+  } catch (err) {
+    console.error('Error fetching template version:', err);
+    return res.status(500).json(error('Failed to fetch version', 500));
+  }
+}
+
+// Revert template to specific version
+async function revertTemplateVersion(req, res, templateId, versionId) {
+  const user = await requireAuth(req, res);
+  if (!user) return;
+
+  try {
+    const result = await db.query(
+      'SELECT revert_template_to_version($1, $2, $3) as success',
+      [templateId, versionId, user.id]
+    );
+
+    if (result.rows[0].success) {
+      return res.json(success({
+        message: 'Template reverted successfully',
+        template_id: templateId
+      }));
+    }
+  } catch (err) {
+    console.error('Error reverting template:', err);
+    return res.status(500).json(error(err.message || 'Failed to revert template', 500));
+  }
+}
+
+// Create manual version snapshot
+async function createManualTemplateVersion(req, res, templateId) {
+  const user = await requireAuth(req, res);
+  if (!user) return;
+
+  const { change_summary } = req.body;
+
+  try {
+    const versionId = await db.query(
+      'SELECT create_template_version($1, $2, $3) as version_id',
+      [templateId, user.id, change_summary || 'Manual snapshot']
+    );
+
+    return res.json(success({
+      message: 'Version created successfully',
+      version_id: versionId.rows[0].version_id
+    }));
+  } catch (err) {
+    console.error('Error creating template version:', err);
+    return res.status(500).json(error('Failed to create version', 500));
+  }
+}
+
+// Get template dependencies
+async function getTemplateDependencies(req, res, templateId) {
+  const user = await requireAuth(req, res);
+  if (!user) return;
+
+  try {
+    const result = await db.query(
+      'SELECT * FROM get_template_dependencies($1)',
+      [templateId]
+    );
+
+    return res.json(success({
+      template_id: templateId,
+      dependencies: result.rows
+    }));
+  } catch (err) {
+    console.error('Error fetching template dependencies:', err);
+    return res.status(500).json(error('Failed to fetch dependencies', 500));
+  }
+}
+
+// Get what depends on this template
+async function getTemplateDependents(req, res, templateId) {
+  const user = await requireAuth(req, res);
+  if (!user) return;
+
+  try {
+    const result = await db.query(
+      'SELECT * FROM get_resource_dependents($1, $2)',
+      ['template', templateId]
+    );
+
+    return res.json(success({
+      template_id: templateId,
+      dependents: result.rows
+    }));
+  } catch (err) {
+    console.error('Error fetching template dependents:', err);
+    return res.status(500).json(error('Failed to fetch dependents', 500));
+  }
+}
+
+// Get suggested contexts based on usage patterns
+async function getSuggestedContexts(req, res, templateId) {
+  const user = await requireAuth(req, res);
+  if (!user) return;
+
+  try {
+    const result = await db.query(
+      'SELECT * FROM get_suggested_contexts($1, $2, $3)',
+      [templateId, user.id, 10]
+    );
+
+    return res.json(success({
+      template_id: templateId,
+      suggested_contexts: result.rows
+    }));
+  } catch (err) {
+    console.error('Error fetching suggested contexts:', err);
+    return res.status(500).json(error('Failed to fetch suggestions', 500));
+  }
+}
+
+// Track template usage with context
+async function trackTemplateUsage(req, res, templateId) {
+  const user = await requireAuth(req, res);
+  if (!user) return;
+
+  const { layer_id } = req.body;
+
+  if (!layer_id) {
+    return res.status(400).json(error('layer_id is required', 400));
+  }
+
+  try {
+    await db.query(
+      'SELECT track_usage_relationship($1, $2, $3)',
+      [templateId, layer_id, user.id]
+    );
+
+    return res.json(success({
+      message: 'Usage tracked successfully'
+    }));
+  } catch (err) {
+    console.error('Error tracking template usage:', err);
+    return res.status(500).json(error('Failed to track usage', 500));
+  }
+}
+
 // Debug function to check database schema
 async function getTableSchema(req, res) {
   try {
     const query = `
-      SELECT column_name, data_type, character_maximum_length, column_default, is_nullable 
-      FROM information_schema.columns 
+      SELECT column_name, data_type, character_maximum_length, column_default, is_nullable
+      FROM information_schema.columns
       WHERE table_name = 'templates'
       ORDER BY ordinal_position;
     `;
-    
+
     const result = await db.query(query);
-    
+
     return res.json({
       table: 'templates',
       columns: result.rows
     });
-    
+
   } catch (error) {
     console.error('Schema query error:', error);
     return res.status(500).json(error('Failed to get schema', 500));

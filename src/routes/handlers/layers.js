@@ -382,6 +382,179 @@ export default async function handler(req, res) {
       return res.json(success(result.rows[0]));
     }
 
+    // GET /team/:teamId - Get team layers
+    if (method === 'GET' && pathParts.length === 2 && pathParts[0] === 'team') {
+      const teamId = pathParts[1];
+
+      // Check if user has access to this team
+      const accessCheck = await db.query(
+        'SELECT user_has_team_access($1, $2) as has_access',
+        [userId, teamId]
+      );
+
+      if (!accessCheck.rows[0].has_access) {
+        return res.status(403).json(error('You do not have access to this team', 403));
+      }
+
+      // Get layers shared with this team
+      const result = await db.query(
+        `SELECT * FROM context_layers
+         WHERE team_id = $1 AND visibility = 'team' AND deleted_at IS NULL
+         ORDER BY updated_at DESC`,
+        [teamId]
+      );
+
+      return res.json(success(result.rows));
+    }
+
+    // POST /:id/share - Share layer with team
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'share') {
+      const layerId = pathParts[0];
+      const { team_id } = req.body;
+
+      if (!team_id) {
+        return res.status(400).json(error('team_id is required', 400));
+      }
+
+      try {
+        // Use the database function to share
+        const result = await db.query(
+          'SELECT share_layer_with_team($1, $2, $3) as success',
+          [layerId, team_id, userId]
+        );
+
+        if (result.rows[0].success) {
+          // Get updated layer
+          const layerResult = await db.query(
+            'SELECT * FROM context_layers WHERE id = $1',
+            [layerId]
+          );
+
+          return res.json(success({
+            layer: layerResult.rows[0],
+            message: 'Layer shared with team successfully'
+          }));
+        }
+      } catch (err) {
+        return res.status(500).json(error(err.message || 'Failed to share layer', 500));
+      }
+    }
+
+    // POST /:id/unshare - Unshare layer (make private)
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'unshare') {
+      const layerId = pathParts[0];
+
+      try {
+        // Use the database function to unshare
+        const result = await db.query(
+          'SELECT unshare_layer($1, $2) as success',
+          [layerId, userId]
+        );
+
+        if (result.rows[0].success) {
+          // Get updated layer
+          const layerResult = await db.query(
+            'SELECT * FROM context_layers WHERE id = $1',
+            [layerId]
+          );
+
+          return res.json(success({
+            layer: layerResult.rows[0],
+            message: 'Layer is now private'
+          }));
+        }
+      } catch (err) {
+        return res.status(500).json(error(err.message || 'Failed to unshare layer', 500));
+      }
+    }
+
+    // GET /:id/versions - Get layer version history
+    if (method === 'GET' && pathParts.length === 2 && pathParts[1] === 'versions') {
+      const layerId = pathParts[0];
+
+      try {
+        const result = await db.query(
+          'SELECT * FROM get_layer_version_history($1, $2)',
+          [layerId, 50] // Get last 50 versions
+        );
+
+        return res.json(success({
+          layer_id: layerId,
+          versions: result.rows,
+          total: result.rows.length
+        }));
+      } catch (err) {
+        console.error('Error fetching layer versions:', err);
+        return res.status(500).json(error('Failed to fetch version history', 500));
+      }
+    }
+
+    // GET /:id/versions/:versionId - Get specific layer version
+    if (method === 'GET' && pathParts.length === 3 && pathParts[1] === 'versions') {
+      const layerId = pathParts[0];
+      const versionId = pathParts[2];
+
+      try {
+        const result = await db.query(
+          'SELECT * FROM context_layer_versions WHERE id = $1 AND layer_id = $2',
+          [versionId, layerId]
+        );
+
+        if (result.rows.length === 0) {
+          return res.status(404).json(error('Version not found', 404));
+        }
+
+        return res.json(success({ version: result.rows[0] }));
+      } catch (err) {
+        console.error('Error fetching layer version:', err);
+        return res.status(500).json(error('Failed to fetch version', 500));
+      }
+    }
+
+    // POST /:id/revert/:versionId - Revert layer to specific version
+    if (method === 'POST' && pathParts.length === 3 && pathParts[1] === 'revert') {
+      const layerId = pathParts[0];
+      const versionId = pathParts[2];
+
+      try {
+        const result = await db.query(
+          'SELECT revert_layer_to_version($1, $2, $3) as success',
+          [layerId, versionId, userId]
+        );
+
+        if (result.rows[0].success) {
+          return res.json(success({
+            message: 'Layer reverted successfully',
+            layer_id: layerId
+          }));
+        }
+      } catch (err) {
+        console.error('Error reverting layer:', err);
+        return res.status(500).json(error(err.message || 'Failed to revert layer', 500));
+      }
+    }
+
+    // POST /:id/versions - Create manual version snapshot
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'versions') {
+      const layerId = pathParts[0];
+      const { change_summary } = req.body;
+
+      try {
+        const versionId = await db.query(
+          'SELECT create_layer_version($1, $2, $3) as version_id',
+          [layerId, userId, change_summary || 'Manual snapshot']
+        );
+
+        return res.json(success({
+          message: 'Version created successfully',
+          version_id: versionId.rows[0].version_id
+        }));
+      } catch (err) {
+        console.error('Error creating layer version:', err);
+        return res.status(500).json(error('Failed to create version', 500));
+      }
+    }
+
     return res.status(404).json(error('Not found', 404));
 
   } catch (err) {

@@ -161,9 +161,16 @@ All endpoints are prefixed with `/api` in production and development.
   - Headers: `Authorization: Bearer <token>`
 
 ### Templates (`/api/templates`)
-- `GET /api/templates` - List user's templates with filters
+
+**Basic CRUD:**
+- `GET /api/templates` - List public templates with filters
   - Query params: `category`, `tags`, `search`, `sort`, `limit`, `offset`
   - Returns: Array of templates
+- `GET /api/templates/my-templates` - List user's private templates
+  - Query params: same as above
+  - Returns: Array of templates
+- `GET /api/templates/team/:teamId` - Get team templates
+  - Returns: Array of team-shared templates
 - `GET /api/templates/:id` - Get single template
   - Returns: Template object
 - `POST /api/templates` - Create new template
@@ -171,7 +178,7 @@ All endpoints are prefixed with `/api` in production and development.
   - Returns: Created template
 - `PUT /api/templates/:id` - Update template
   - Body: Partial template fields
-  - Returns: Updated template
+  - Returns: Updated template (triggers auto-versioning)
 - `DELETE /api/templates/:id` - Soft delete template
   - Returns: `{ deleted: true }`
 - `POST /api/templates/:id/use` - Track template usage
@@ -179,11 +186,50 @@ All endpoints are prefixed with `/api` in production and development.
 - `POST /api/templates/:id/favorite` - Toggle favorite
   - Returns: Updated favorite status
 
+**Team Collaboration:**
+- `POST /api/templates/:id/share` - Share template with team
+  - Body: `{ team_id }`
+  - Returns: `{ success: true, template: {...} }`
+- `POST /api/templates/:id/unshare` - Unshare template (make private)
+  - Returns: `{ success: true, template: {...} }`
+
+**Version History:**
+- `GET /api/templates/:id/versions` - Get version history
+  - Returns: `{ template_id, versions: [...], total: N }`
+  - Versions include: version_number, content, created_at, created_by, change_summary, is_current
+- `GET /api/templates/:id/versions/:versionId` - Get specific version
+  - Returns: `{ version: {...} }`
+- `POST /api/templates/:id/revert/:versionId` - Revert to a previous version
+  - Creates new version with old content
+  - Returns: `{ success: true, message: "Template reverted" }`
+- `POST /api/templates/:id/versions` - Create manual version snapshot
+  - Body: `{ change_summary: "Description of changes" }`
+  - Returns: `{ success: true, version_id: "..." }`
+
+**Dependency Tracking:**
+- `GET /api/templates/:id/dependencies` - Get what this template depends on
+  - Returns: `{ dependencies: [{type, name, is_required, resource_exists}] }`
+  - Types: 'variable', 'context_layer', 'template'
+- `GET /api/templates/:id/dependents` - Get what depends on this template
+  - Returns: `{ dependents: [{dependent_id, dependent_name, dependency_count}] }`
+  - Impact analysis for deletion/changes
+- `GET /api/templates/:id/suggested-contexts` - Get smart context suggestions
+  - Returns: `{ suggested_contexts: [{layer_id, layer_name, usage_count, last_used}] }`
+  - Based on user's usage patterns
+- `POST /api/templates/:id/track-usage` - Track template-context usage
+  - Body: `{ layer_id }`
+  - Updates usage relationship for suggestions
+  - Returns: `{ success: true }`
+
 ### Context Layers (`/api/contexts/layers`)
+
+**Basic CRUD:**
 - `GET /api/contexts/layers` - List context layers with filters
   - Query params: `type`, `tags`, `visibility`, `search`, `sort`, `limit`, `offset`
   - Layer types: `profile`, `project`, `task`, `snippet`, `adhoc`
   - Returns: Array of layers
+- `GET /api/contexts/layers/team/:teamId` - Get team context layers
+  - Returns: Array of team-shared layers
 - `GET /api/contexts/layers/search` - Search layers
   - Query params: `q`, `limit`
   - Returns: `{ layers: [...] }`
@@ -194,7 +240,7 @@ All endpoints are prefixed with `/api` in production and development.
   - Returns: `{ layer: {...} }`
 - `PUT /api/contexts/layers/:id` - Update layer
   - Body: Partial layer fields
-  - Returns: `{ layer: {...} }`
+  - Returns: `{ layer: {...} }` (triggers auto-versioning)
 - `DELETE /api/contexts/layers/:id` - Soft delete layer
   - Returns: `{ id, name, deleted: true }`
 - `POST /api/contexts/layers/:id/use` - Track layer usage
@@ -202,6 +248,25 @@ All endpoints are prefixed with `/api` in production and development.
 - `POST /api/contexts/layers/:id/rating` - Rate layer
   - Body: `{ rating }` (1-5)
   - Returns: `{ id, avg_rating, favorite_count }`
+
+**Team Collaboration:**
+- `POST /api/contexts/layers/:id/share` - Share layer with team
+  - Body: `{ team_id }`
+  - Returns: `{ success: true, layer: {...} }`
+- `POST /api/contexts/layers/:id/unshare` - Unshare layer (make private)
+  - Returns: `{ success: true, layer: {...} }`
+
+**Version History:**
+- `GET /api/contexts/layers/:id/versions` - Get version history
+  - Returns: `{ layer_id, versions: [...], total: N }`
+- `GET /api/contexts/layers/:id/versions/:versionId` - Get specific version
+  - Returns: `{ version: {...} }`
+- `POST /api/contexts/layers/:id/revert/:versionId` - Revert to a previous version
+  - Creates new version with old content
+  - Returns: `{ success: true, message: "Layer reverted" }`
+- `POST /api/contexts/layers/:id/versions` - Create manual version snapshot
+  - Body: `{ change_summary: "Description of changes" }`
+  - Returns: `{ success: true, version_id: "..." }`
 
 ### Teams (`/api/teams`)
 - `GET /api/teams` - List user's teams
@@ -600,6 +665,41 @@ Handlers expected incorrect path lengths due to not accounting for Express prefi
 ---
 
 ## Recent Updates
+
+### January 2025 - Phase 3: Advanced Features Complete ✅
+
+**Version History System:**
+- ✅ Added `template_versions` and `context_layer_versions` tables
+- ✅ Implemented auto-versioning triggers on every UPDATE
+- ✅ Created version history API endpoints for templates and contexts
+- ✅ Added functions: `create_template_version()`, `revert_template_to_version()`, etc.
+- ✅ Migration: `add_version_history.sql` (392 lines)
+
+**Team Collaboration:**
+- ✅ Added `team_id` and `visibility` columns to templates and context_layers
+- ✅ Implemented team sharing endpoints: `/share` and `/unshare`
+- ✅ Created helper functions: `share_template_with_team()`, `user_has_template_access()`
+- ✅ Added `/team/:teamId` endpoints for getting team resources
+- ✅ Migration: `add_team_sharing.sql` (150 lines)
+
+**Dependency Tracking:**
+- ✅ Added `template_dependencies`, `layer_dependencies`, `usage_relationships` tables
+- ✅ Implemented automatic variable extraction from templates
+- ✅ Created dependency analysis endpoints: `/dependencies`, `/dependents`, `/suggested-contexts`
+- ✅ Added smart context suggestions based on usage patterns
+- ✅ Track template-context usage relationships for recommendations
+- ✅ Migration: `add_dependency_tracking.sql` (332 lines)
+
+**New Endpoints (40+):**
+- Templates: 16 new endpoints (versions, dependencies, team sharing)
+- Contexts: 12 new endpoints (versions, team sharing)
+- Total: 28+ new API endpoints added
+
+**Database Changes:**
+- 3 new major migrations
+- 8 new tables (versions, dependencies, relationships)
+- 12+ new PostgreSQL functions
+- 6+ new triggers for auto-versioning and dependency detection
 
 ### November 2024 - Routing Architecture Fixes
 
