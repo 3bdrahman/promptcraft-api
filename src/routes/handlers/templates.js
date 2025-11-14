@@ -98,6 +98,11 @@ export default async function handler(req, res) {
       return await getSuggestedContexts(req, res, pathParts[1]);
     }
 
+    // POST /templates/:id/clone - Clone template
+    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'clone') {
+      return await cloneTemplate(req, res, pathParts[1]);
+    }
+
     // POST /templates/:id/track-usage - Track template usage with context
     if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'track-usage') {
       return await trackTemplateUsage(req, res, pathParts[1]);
@@ -1370,6 +1375,57 @@ async function trackTemplateUsage(req, res, templateId) {
   } catch (err) {
     console.error('Error tracking template usage:', err);
     return res.status(500).json(error('Failed to track usage', 500));
+  }
+}
+
+// Clone template (create a copy for current user)
+async function cloneTemplate(req, res, templateId) {
+  const user = await requireAuth(req, res);
+  if (!user) return;
+
+  const { name: customName } = req.body;
+
+  try {
+    // Get original template
+    const templateResult = await db.query(
+      'SELECT * FROM templates WHERE id = $1',
+      [templateId]
+    );
+
+    if (templateResult.rows.length === 0) {
+      return res.status(404).json(error('Template not found', 404));
+    }
+
+    const originalTemplate = templateResult.rows[0];
+
+    // Create clone with new name
+    const cloneName = customName || `${originalTemplate.name} (Copy)`;
+
+    const insertResult = await db.query(
+      `INSERT INTO templates (
+        user_id, name, content, description, category,
+        is_public, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, false, NOW(), NOW())
+      RETURNING *`,
+      [
+        user.id,
+        cloneName,
+        originalTemplate.content,
+        originalTemplate.description,
+        originalTemplate.category
+      ]
+    );
+
+    const clonedTemplate = insertResult.rows[0];
+
+    return res.status(201).json(success({
+      template: clonedTemplate,
+      message: 'Template cloned successfully'
+    }));
+
+  } catch (err) {
+    console.error('Error cloning template:', err);
+    return res.status(500).json(error('Failed to clone template', 500));
   }
 }
 

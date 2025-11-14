@@ -6,6 +6,7 @@
 import { db } from '../../../utils/database.js';
 import { requireAuth } from '../../../utils/auth.js';
 import { success, error } from '../../../utils/responses.js';
+import { sendTeamInvitationEmail } from '../../../utils/email.js';
 import crypto from 'crypto';
 
 /**
@@ -123,6 +124,21 @@ export async function createTeamInvitation(req, res) {
       return res.status(400).json(error('An invitation has already been sent to this email', 400));
     }
 
+    // Get team details and inviter name for email
+    const teamDetails = await db.query(
+      `SELECT t.name, u.username
+       FROM teams t, users u
+       WHERE t.id = $1 AND u.id = $2`,
+      [teamId, userId]
+    );
+
+    if (teamDetails.rows.length === 0) {
+      return res.status(404).json(error('Team or user not found', 404));
+    }
+
+    const teamName = teamDetails.rows[0].name;
+    const inviterName = teamDetails.rows[0].username;
+
     // Generate invitation token
     const token = crypto.randomBytes(32).toString('hex');
 
@@ -135,12 +151,18 @@ export async function createTeamInvitation(req, res) {
       [teamId, userId, invitedUserId, email, role, token]
     );
 
-    // TODO: Send invitation email
-    // await sendInvitationEmail(email, token, teamId);
+    // Send invitation email
+    const invitationUrl = `${process.env.APP_URL || 'http://localhost:3000'}/invitations/${token}`;
+    try {
+      await sendTeamInvitationEmail(email, teamName, inviterName, invitationUrl, role);
+    } catch (emailError) {
+      console.error('Failed to send invitation email:', emailError);
+      // Don't fail the request if email fails - invitation is still created
+    }
 
     return res.json(success({
       invitation: result.rows[0],
-      invitationUrl: `${process.env.APP_URL || 'http://localhost:3001'}/invitations/${token}`
+      invitationUrl
     }));
   } catch (err) {
     console.error('Error creating invitation:', err);

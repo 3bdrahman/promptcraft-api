@@ -223,6 +223,150 @@ The ${APP_NAME} Team
   };
 }
 
+function getTeamInvitationTemplate(teamName, inviterName, invitationUrl, role) {
+  return {
+    subject: `You've been invited to join ${teamName} on ${APP_NAME}`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Team Invitation</title>
+        <style>
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+          }
+          .container {
+            background: #ffffff;
+            border-radius: 8px;
+            padding: 40px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+          }
+          .header {
+            text-align: center;
+            margin-bottom: 30px;
+          }
+          .logo {
+            font-size: 24px;
+            font-weight: bold;
+            color: #6366f1;
+          }
+          .team-badge {
+            background: #eef2ff;
+            border: 2px solid #6366f1;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            margin: 30px 0;
+          }
+          .team-name {
+            font-size: 24px;
+            font-weight: bold;
+            color: #6366f1;
+            margin-bottom: 10px;
+          }
+          .role-badge {
+            display: inline-block;
+            background: #6366f1;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 500;
+          }
+          .cta-button {
+            display: inline-block;
+            background: #6366f1;
+            color: white !important;
+            text-decoration: none;
+            padding: 12px 30px;
+            border-radius: 6px;
+            font-weight: 600;
+            margin: 20px 0;
+          }
+          .cta-button:hover {
+            background: #4f46e5;
+          }
+          .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #e5e7eb;
+            font-size: 14px;
+            color: #6b7280;
+            text-align: center;
+          }
+          .link-box {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 4px;
+            padding: 15px;
+            margin: 20px 0;
+            word-break: break-all;
+            font-size: 12px;
+            color: #6b7280;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <div class="logo">${APP_NAME}</div>
+          </div>
+
+          <h1>You've Been Invited!</h1>
+          <p><strong>${inviterName}</strong> has invited you to join their team on ${APP_NAME}.</p>
+
+          <div class="team-badge">
+            <div class="team-name">${teamName}</div>
+            <div><span class="role-badge">${role}</span></div>
+          </div>
+
+          <p>As a ${role}, you'll be able to collaborate on prompt templates and context layers with your team members.</p>
+
+          <div style="text-align: center;">
+            <a href="${invitationUrl}" class="cta-button">Accept Invitation</a>
+          </div>
+
+          <p style="font-size: 14px; color: #6b7280;">Or copy and paste this link into your browser:</p>
+          <div class="link-box">${invitationUrl}</div>
+
+          <p style="margin-top: 30px; font-size: 14px; color: #6b7280;">This invitation link is unique to you and can only be used once. If you don't want to join this team, you can safely ignore this email.</p>
+
+          <div class="footer">
+            <p>&copy; ${new Date().getFullYear()} ${APP_NAME}. All rights reserved.</p>
+            <p>Questions? Contact us at <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+    text: `
+${APP_NAME} - Team Invitation
+
+You've been invited to join ${teamName}!
+
+${inviterName} has invited you to join their team on ${APP_NAME} as a ${role}.
+
+Accept your invitation:
+${invitationUrl}
+
+As a ${role}, you'll be able to collaborate on prompt templates and context layers with your team members.
+
+This invitation link is unique to you and can only be used once. If you don't want to join this team, you can safely ignore this email.
+
+Questions? Contact us at ${SUPPORT_EMAIL}
+
+© ${new Date().getFullYear()} ${APP_NAME}
+    `.trim()
+  };
+}
+
 // ============================================================================
 // EMAIL SENDING FUNCTIONS
 // ============================================================================
@@ -328,6 +472,62 @@ export async function sendWelcomeEmail(to, username) {
 }
 
 /**
+ * Send team invitation email
+ */
+export async function sendTeamInvitationEmail(to, teamName, inviterName, invitationUrl, role = 'member') {
+  const template = getTeamInvitationTemplate(teamName, inviterName, invitationUrl, role);
+
+  try {
+    // DEVELOPMENT MODE - Just log
+    if (process.env.NODE_ENV === 'development' || !process.env.RESEND_API_KEY) {
+      console.log('\n📧 ============================================');
+      console.log('📧 TEAM INVITATION (Development Mode)');
+      console.log('📧 ============================================');
+      console.log(`📧 To: ${to}`);
+      console.log(`📧 Team: ${teamName}`);
+      console.log(`📧 Inviter: ${inviterName}`);
+      console.log(`📧 Role: ${role}`);
+      console.log(`📧 URL: ${invitationUrl}`);
+      console.log('📧 ============================================\n');
+      return { success: true, messageId: 'dev-mode' };
+    }
+
+    // PRODUCTION MODE - Send via Resend
+    const resendClient = getResendClient();
+
+    if (!resendClient) {
+      console.log('⚠️  Resend not configured, skipping invitation email');
+      return { success: false, error: 'Resend not configured' };
+    }
+
+    const { data, error } = await resendClient.emails.send({
+      from: FROM_EMAIL,
+      to,
+      subject: template.subject,
+      html: template.html,
+      text: template.text
+    });
+
+    if (error) {
+      throw error;
+    }
+
+    console.log(`✅ Team invitation sent via Resend to: ${to} (ID: ${data.id})`);
+
+    return {
+      success: true,
+      messageId: data.id,
+      provider: 'resend'
+    };
+
+  } catch (error) {
+    console.error('❌ Failed to send team invitation email:', error);
+    // Don't throw - invitation email failure shouldn't block the invitation creation
+    return { success: false, error: error.message };
+  }
+}
+
+/**
  * Generate a random 6-digit PIN
  */
 export function generatePin() {
@@ -337,5 +537,6 @@ export function generatePin() {
 export default {
   sendVerificationPin,
   sendWelcomeEmail,
+  sendTeamInvitationEmail,
   generatePin
 };

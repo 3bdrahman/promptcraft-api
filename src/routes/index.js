@@ -51,6 +51,7 @@ import {
 
 // Context endpoints
 import contextsRouter from './handlers/contexts/index.js';
+import contextsAdvancedRouter from './handlers/contexts/contexts-advanced.js';
 
 // AI endpoints
 import aiGenerateHandler from './handlers/ai/generate.js';
@@ -90,8 +91,8 @@ router.use('/contexts/combinations', asyncHandler(combinationsHandler));
 router.use('/contexts/snippets', asyncHandler(snippetsHandler));
 
 // Advanced context routes (composition, relationships, versions, search)
-// TODO: Convert contextsRouter from Vercel function handler to Express router
-// router.use('/contexts', contextsRouter);
+// Converted to Express router - now enabled!
+router.use('/contexts', contextsAdvancedRouter);
 
 // ============================================
 // Teams Routes

@@ -44,7 +44,8 @@ export default async function handler(req, res) {
       systemPrompt = '',
       maxTokens = 2048,
       temperature = 0.7,
-      messages
+      messages,
+      apiKey: clientApiKey // Optional client-provided API key
     } = req.body;
 
     // Validate required fields
@@ -72,15 +73,15 @@ export default async function handler(req, res) {
       });
     }
 
+    // Determine which API key to use (client-provided or environment variable)
+    let apiKeyToUse = clientApiKey || process.env[providerConfig.envKey];
+
     // Check if provider requires API key
-    if (providerConfig.requiresApiKey) {
-      const apiKey = process.env[providerConfig.envKey];
-      if (!apiKey) {
-        return res.status(500).json({
-          success: false,
-          error: `API key not configured for provider: ${provider}. Please set ${providerConfig.envKey} in environment variables.`
-        });
-      }
+    if (providerConfig.requiresApiKey && !apiKeyToUse) {
+      return res.status(400).json({
+        success: false,
+        error: `API key required for provider: ${provider}. Either provide 'apiKey' in request body or set ${providerConfig.envKey} in environment variables.`
+      });
     }
 
     // Prepare parameters
@@ -98,19 +99,19 @@ export default async function handler(req, res) {
 
     switch (provider) {
       case AI_PROVIDERS.OPENAI:
-        result = await generateOpenAI(params, process.env.OPENAI_API_KEY);
+        result = await generateOpenAI(params, apiKeyToUse);
         break;
 
       case AI_PROVIDERS.ANTHROPIC:
-        result = await generateAnthropic(params, process.env.ANTHROPIC_API_KEY);
+        result = await generateAnthropic(params, apiKeyToUse);
         break;
 
       case AI_PROVIDERS.GOOGLE:
-        result = await generateGoogle(params, process.env.GOOGLE_API_KEY);
+        result = await generateGoogle(params, apiKeyToUse);
         break;
 
       case AI_PROVIDERS.HUGGINGFACE:
-        result = await generateHuggingFace(params, process.env.HUGGINGFACE_API_KEY);
+        result = await generateHuggingFace(params, apiKeyToUse);
         break;
 
       case AI_PROVIDERS.OLLAMA:
