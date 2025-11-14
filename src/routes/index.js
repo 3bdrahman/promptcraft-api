@@ -15,6 +15,7 @@ import authByEmailHandler from './handlers/auth-by-email.js';
 import subscriptionHandler from './handlers/subscription.js';
 import analyticsHandler from './handlers/analytics.js';
 import subscriptionsHandler from './handlers/subscriptions.js';
+import userHandler from './handlers/user.js';
 
 // Auth endpoints
 import signupHandler from './handlers/auth/signup.js';
@@ -76,6 +77,11 @@ router.post('/auth/logout-all', asyncHandler(logoutAllHandler));
 router.post('/auth/verify-pin', asyncHandler(verifyPinHandler));
 router.post('/auth/resend-pin', asyncHandler(resendPinHandler));
 router.post('/user/auth-by-email', asyncHandler(authByEmailHandler));
+
+// ============================================
+// User Profile Routes
+// ============================================
+router.use('/user', asyncHandler(userHandler));
 
 // ============================================
 // Templates Routes

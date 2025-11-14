@@ -108,6 +108,11 @@ export default async function handler(req, res) {
       return await trackTemplateUsage(req, res, pathParts[1]);
     }
 
+    // POST /templates/:id/render - Render template with variable substitution
+    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'render') {
+      return await renderTemplate(req, res, pathParts[1]);
+    }
+
     // GET /templates/:id - Get single template
     if (method === 'GET' && pathParts.length === 2 && !['favorites', 'my-templates', 'schema', 'team'].includes(pathParts[1])) {
       return await getTemplate(req, res, pathParts[1]);
@@ -1427,6 +1432,160 @@ async function cloneTemplate(req, res, templateId) {
     console.error('Error cloning template:', err);
     return res.status(500).json(error('Failed to clone template', 500));
   }
+}
+
+/**
+ * Render template with variable substitution
+ * POST /api/templates/:id/render
+ * Body: { variables: { var1: "value1", var2: "value2" } }
+ * Returns: { rendered: "final prompt text", metadata: {...} }
+ */
+async function renderTemplate(req, res, templateId) {
+  try {
+    const userId = await getUserId(req);
+    const { variables = {} } = req.body;
+
+    // Validate input
+    if (typeof variables !== 'object' || Array.isArray(variables)) {
+      return res.status(400).json(error('Variables must be an object', 400));
+    }
+
+    // Get template
+    const templateResult = await db.query(
+      `SELECT * FROM templates WHERE id = $1`,
+      [templateId]
+    );
+
+    if (templateResult.rows.length === 0) {
+      return res.status(404).json(error('Template not found', 404));
+    }
+
+    const template = templateResult.rows[0];
+
+    // Check access permissions
+    if (!template.is_public && template.user_id !== userId) {
+      // Check if user has team access
+      if (template.team_id) {
+        const teamAccessResult = await db.query(
+          `SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2`,
+          [template.team_id, userId]
+        );
+        if (teamAccessResult.rows.length === 0) {
+          return res.status(403).json(error('Access denied', 403));
+        }
+      } else {
+        return res.status(403).json(error('Access denied', 403));
+      }
+    }
+
+    // Extract variables from template content
+    const templateVars = extractTemplateVariables(template.content);
+
+    // Check for required variables
+    const missingVars = [];
+    for (const varInfo of templateVars) {
+      if (varInfo.required && !(varInfo.name in variables)) {
+        missingVars.push(varInfo.name);
+      }
+    }
+
+    if (missingVars.length > 0) {
+      return res.status(400).json(error(
+        `Missing required variables: ${missingVars.join(', ')}`,
+        400,
+        { missingVariables: missingVars, requiredVariables: templateVars.filter(v => v.required) }
+      ));
+    }
+
+    // Substitute variables in template content
+    let rendered = template.content;
+
+    for (const [varName, varValue] of Object.entries(variables)) {
+      // Support multiple variable formats:
+      // {{varName}}
+      // {{varName:type}}
+      // {{varName:type:description}}
+      const patterns = [
+        new RegExp(`\\{\\{${escapeRegExp(varName)}\\}\\}`, 'g'),
+        new RegExp(`\\{\\{${escapeRegExp(varName)}:[^:}]+\\}\\}`, 'g'),
+        new RegExp(`\\{\\{${escapeRegExp(varName)}:[^:}]+:[^}]+\\}\\}`, 'g'),
+      ];
+
+      for (const pattern of patterns) {
+        rendered = rendered.replace(pattern, String(varValue));
+      }
+    }
+
+    // Track template usage
+    if (userId) {
+      await db.query(
+        `INSERT INTO template_usage (template_id, user_id, used_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT DO NOTHING`,
+        [templateId, userId]
+      ).catch(() => {}); // Ignore if table doesn't exist
+    }
+
+    // Calculate token count (rough estimate: 4 chars ≈ 1 token)
+    const estimatedTokens = Math.ceil(rendered.length / 4);
+
+    return res.json(success({
+      rendered,
+      template_id: templateId,
+      template_name: template.name,
+      metadata: {
+        original_length: template.content.length,
+        rendered_length: rendered.length,
+        estimated_tokens: estimatedTokens,
+        variables_used: Object.keys(variables),
+        variables_required: templateVars.filter(v => v.required).map(v => v.name),
+        variables_optional: templateVars.filter(v => !v.required).map(v => v.name)
+      }
+    }));
+
+  } catch (err) {
+    console.error('Error rendering template:', err);
+    return res.status(500).json(error('Failed to render template', 500));
+  }
+}
+
+/**
+ * Extract variables from template content
+ * Returns array of { name, type, description, required }
+ */
+function extractTemplateVariables(content) {
+  if (!content) return [];
+
+  const regex = /\{\{([^}]+)\}\}/g;
+  const matches = [...content.matchAll(regex)];
+  const variables = [];
+  const seen = new Set();
+
+  for (const match of matches) {
+    const fullMatch = match[1].trim();
+    const parts = fullMatch.split(':').map(p => p.trim());
+
+    const name = parts[0];
+    if (seen.has(name)) continue;
+
+    seen.add(name);
+
+    variables.push({
+      name,
+      type: parts[1] || 'text',
+      description: parts[2] || '',
+      required: true // Default to required unless explicitly optional
+    });
+  }
+
+  return variables;
+}
+
+/**
+ * Escape special regex characters
+ */
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // Debug function to check database schema
