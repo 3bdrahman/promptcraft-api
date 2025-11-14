@@ -41,10 +41,13 @@ export async function getTeam(req, res) {
     const userId = user.id;
     const teamId = req.params.id;
 
-    // Check if user has access to this team
+    // Check if user has access to this team (is a member)
     const accessCheck = await db.query(
-      `SELECT user_has_team_access($1, $2) as has_access`,
-      [userId, teamId]
+      `SELECT EXISTS(
+        SELECT 1 FROM team_members
+        WHERE team_id = $1 AND user_id = $2
+      ) as has_access`,
+      [teamId, userId]
     );
 
     if (!accessCheck.rows[0].has_access) {
@@ -140,11 +143,12 @@ export async function updateTeam(req, res) {
 
     // Check if user is owner or admin
     const roleCheck = await db.query(
-      `SELECT user_has_team_role($1, $2, 'admin') as has_permission`,
-      [userId, teamId]
+      `SELECT role FROM team_members
+       WHERE team_id = $1 AND user_id = $2`,
+      [teamId, userId]
     );
 
-    if (!roleCheck.rows[0].has_permission) {
+    if (roleCheck.rows.length === 0 || !['admin', 'owner'].includes(roleCheck.rows[0].role)) {
       return res.status(403).json(error('Only team owners and admins can update team details', 403));
     }
 

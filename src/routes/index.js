@@ -4,6 +4,7 @@
  */
 
 import express from 'express';
+import { authenticateToken } from '../middleware/auth/middleware.js';
 
 // Import all endpoint handlers
 import templatesHandler from './handlers/templates.js';
@@ -16,7 +17,7 @@ import subscriptionHandler from './handlers/subscription.js';
 import analyticsHandler from './handlers/analytics.js';
 import subscriptionsHandler from './handlers/subscriptions.js';
 import userHandler from './handlers/user.js';
-
+import workflowsHandler from './handlers/workflows.js';
 // Auth endpoints
 import signupHandler from './handlers/auth/signup.js';
 import loginHandler from './handlers/auth/login.js';
@@ -99,7 +100,7 @@ router.use('/contexts/snippets', asyncHandler(snippetsHandler));
 // Advanced context routes (composition, relationships, versions, search)
 // Converted to Express router - now enabled!
 router.use('/contexts', contextsAdvancedRouter);
-
+router.use('/workflows', authenticateToken, asyncHandler(workflowsHandler));
 // ============================================
 // Teams Routes
 // ============================================
@@ -112,13 +113,13 @@ router.put('/teams/:id', asyncHandler(updateTeam));
 router.delete('/teams/:id', asyncHandler(deleteTeam));
 
 // Team Members
-router.get('/teams/:id/members', asyncHandler(getTeamMembers));
-router.put('/teams/:id/members/:userId', asyncHandler(updateTeamMember));
-router.delete('/teams/:id/members/:userId', asyncHandler(removeTeamMember));
+router.get('/teams/:teamId/members', asyncHandler(getTeamMembers));
+router.put('/teams/:teamId/members/:memberId', asyncHandler(updateTeamMember));
+router.delete('/teams/:teamId/members/:memberId', asyncHandler(removeTeamMember));
 
 // Team Invitations
-router.get('/teams/:id/invitations', asyncHandler(getTeamInvitations));
-router.post('/teams/:id/invitations', asyncHandler(createTeamInvitation));
+router.get('/teams/:teamId/invitations', asyncHandler(getTeamInvitations));
+router.post('/teams/:teamId/invitations', asyncHandler(createTeamInvitation));
 router.get('/invitations/:token', asyncHandler(getInvitationByToken));
 router.post('/invitations/:token/accept', asyncHandler(acceptInvitation));
 router.post('/invitations/:token/reject', asyncHandler(rejectInvitation));

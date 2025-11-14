@@ -17,10 +17,13 @@ export async function getTeamMembers(req, res) {
     const userId = user.id;
     const teamId = req.params.teamId;
 
-    // Check if user has access to this team
+    // Check if user has access to this team (is a member)
     const accessCheck = await db.query(
-      `SELECT user_has_team_access($1, $2) as has_access`,
-      [userId, teamId]
+      `SELECT EXISTS(
+        SELECT 1 FROM team_members
+        WHERE team_id = $1 AND user_id = $2
+      ) as has_access`,
+      [teamId, userId]
     );
 
     if (!accessCheck.rows[0].has_access) {
@@ -74,11 +77,12 @@ export async function updateTeamMember(req, res) {
 
     // Check if requesting user is admin or owner
     const roleCheck = await db.query(
-      `SELECT user_has_team_role($1, $2, 'admin') as has_permission`,
-      [userId, teamId]
+      `SELECT role FROM team_members
+       WHERE team_id = $1 AND user_id = $2`,
+      [teamId, userId]
     );
 
-    if (!roleCheck.rows[0].has_permission) {
+    if (roleCheck.rows.length === 0 || !['admin', 'owner'].includes(roleCheck.rows[0].role)) {
       return res.status(403).json(error('Only team admins and owners can modify member roles', 403));
     }
 
@@ -165,11 +169,12 @@ export async function removeTeamMember(req, res) {
     const isRemovingSelf = memberUserId === userId;
     if (!isRemovingSelf) {
       const roleCheck = await db.query(
-        `SELECT user_has_team_role($1, $2, 'admin') as has_permission`,
-        [userId, teamId]
+        `SELECT role FROM team_members
+         WHERE team_id = $1 AND user_id = $2`,
+        [teamId, userId]
       );
 
-      if (!roleCheck.rows[0].has_permission) {
+      if (roleCheck.rows.length === 0 || !['admin', 'owner'].includes(roleCheck.rows[0].role)) {
         return res.status(403).json(error('Only team admins can remove members', 403));
       }
     }
