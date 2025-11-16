@@ -142,28 +142,32 @@ export async function findSimilar(req, res, contextId) {
       min_similarity = 0.7
     } = req.query;
 
-    // Verify ownership and get embedding
-    const contextResult = await db.query(
-      `SELECT id, name, embedding
-       FROM context_layers
-       WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
-      [contextId, userId]
+    // Verify ownership
+    const contextCheck = await db.query(
+      `SELECT id, name FROM context_layers WHERE id = $1 AND deleted_at IS NULL`,
+      [contextId]
     );
 
-    if (contextResult.rows.length === 0) {
+    if (contextCheck.rows.length === 0) {
       return res.status(404).json(error('Context not found', 404));
     }
 
-    const context = contextResult.rows[0];
+    // Get embedding from context_embeddings table
+    const embeddingResult = await db.query(
+      `SELECT embedding FROM context_embeddings WHERE context_id = $1`,
+      [contextId]
+    );
 
-    if (!context.embedding) {
+    if (embeddingResult.rows.length === 0 || !embeddingResult.rows[0].embedding) {
       return res.json(success({
         similar: [],
         message: 'This context does not have an embedding yet. Please trigger embedding generation.'
       }));
     }
 
-    // Find similar contexts
+    const embedding = embeddingResult.rows[0].embedding;
+
+    // Find similar contexts using the migration function
     const result = await db.query(
       `SELECT * FROM find_similar_contexts(
         $1::vector(384),
@@ -172,7 +176,7 @@ export async function findSimilar(req, res, contextId) {
         $4::DECIMAL,
         ARRAY[$5]::UUID[]
       )`,
-      [context.embedding, userId, parseInt(limit), parseFloat(min_similarity), contextId]
+      [embedding, userId, parseInt(limit), parseFloat(min_similarity), contextId]
     );
 
     return res.json(success({ similar: result.rows }));
@@ -193,40 +197,13 @@ export async function getEffectivenessMetrics(req, res) {
       return res.status(401).json(error('Unauthorized', 401));
     }
 
-    const { context_id = null } = req.query;
+    const { min_usage_count = 5 } = req.query;
 
-    let query;
-    let params;
-
-    if (context_id) {
-      // Get effectiveness for specific context
-      query = `
-        SELECT
-          cem.*,
-          cl.name as context_name,
-          cl.layer_type
-        FROM context_effectiveness_metrics cem
-        JOIN context_layers cl ON cem.context_id = cl.id
-        WHERE cl.user_id = $1 AND cem.context_id = $2
-      `;
-      params = [userId, context_id];
-    } else {
-      // Get effectiveness for all user's contexts
-      query = `
-        SELECT
-          cem.*,
-          cl.name as context_name,
-          cl.layer_type
-        FROM context_effectiveness_metrics cem
-        JOIN context_layers cl ON cem.context_id = cl.id
-        WHERE cl.user_id = $1
-        ORDER BY cem.total_uses DESC
-        LIMIT 50
-      `;
-      params = [userId];
-    }
-
-    const result = await db.query(query, params);
+    // Use the get_context_effectiveness function from migration
+    const result = await db.query(
+      `SELECT * FROM get_context_effectiveness($1::UUID, $2::INT)`,
+      [userId, parseInt(min_usage_count)]
+    );
 
     return res.json(success({ metrics: result.rows }));
   } catch (err) {
@@ -322,46 +299,17 @@ export async function getAssociations(req, res) {
       return res.status(401).json(error('Unauthorized', 401));
     }
 
-    const { context_id = null, limit = 20 } = req.query;
+    const { context_id, limit = 10 } = req.query;
 
-    let query;
-    let params;
-
-    if (context_id) {
-      // Get associations for specific context
-      query = `
-        SELECT
-          ca.*,
-          cl_a.name as context_a_name,
-          cl_b.name as context_b_name
-        FROM context_associations ca
-        JOIN context_layers cl_a ON ca.context_a_id = cl_a.id
-        JOIN context_layers cl_b ON ca.context_b_id = cl_b.id
-        WHERE (ca.context_a_id = $1 OR ca.context_b_id = $1)
-          AND cl_a.user_id = $2
-          AND cl_b.user_id = $2
-        ORDER BY ca.co_occurrence_count DESC
-        LIMIT $3
-      `;
-      params = [context_id, userId, parseInt(limit)];
-    } else {
-      // Get top associations for user
-      query = `
-        SELECT
-          ca.*,
-          cl_a.name as context_a_name,
-          cl_b.name as context_b_name
-        FROM context_associations ca
-        JOIN context_layers cl_a ON ca.context_a_id = cl_a.id
-        JOIN context_layers cl_b ON ca.context_b_id = cl_b.id
-        WHERE cl_a.user_id = $1 AND cl_b.user_id = $1
-        ORDER BY ca.co_occurrence_count DESC
-        LIMIT $2
-      `;
-      params = [userId, parseInt(limit)];
+    if (!context_id) {
+      return res.status(400).json(error('context_id is required'));
     }
 
-    const result = await db.query(query, params);
+    // Use the get_context_associations function from migration
+    const result = await db.query(
+      `SELECT * FROM get_context_associations($1::UUID, $2::UUID, $3::INT)`,
+      [context_id, userId, parseInt(limit)]
+    );
 
     return res.json(success({ associations: result.rows }));
   } catch (err) {
@@ -393,12 +341,12 @@ export async function queueEmbeddingGeneration(req, res, contextId) {
       return res.status(404).json(error('Context not found', 404));
     }
 
-    // Add to queue
+    // Add to queue using the migration table name
     const result = await db.query(
-      `INSERT INTO embedding_generation_queue (context_id, priority, status)
-       VALUES ($1, $2, 'pending')
-       ON CONFLICT (context_id, status)
-       DO UPDATE SET priority = $2, attempts = 0
+      `INSERT INTO embedding_queue (resource_type, resource_id, priority, status)
+       VALUES ('context', $1, $2, 'pending')
+       ON CONFLICT (resource_type, resource_id, status)
+       DO UPDATE SET priority = $2, retry_count = 0
        RETURNING *`,
       [contextId, priority]
     );
@@ -409,6 +357,58 @@ export async function queueEmbeddingGeneration(req, res, contextId) {
     }));
   } catch (err) {
     console.error('Queue embedding generation error:', err);
+    return res.status(500).json(error(err.message, 500));
+  }
+}
+
+/**
+ * POST /api/contexts/hybrid-search
+ * Hybrid search combining full-text and semantic similarity
+ */
+export async function hybridSearch(req, res) {
+  try {
+    const userId = await getUserId(req);
+    if (!userId) {
+      return res.status(401).json(error('Unauthorized', 401));
+    }
+
+    const {
+      query_text,
+      query_embedding = null,
+      limit = 10,
+      semantic_weight = 0.7
+    } = req.body;
+
+    if (!query_text) {
+      return res.status(400).json(error('query_text is required'));
+    }
+
+    // Generate embedding from query_text if not provided
+    let embedding = query_embedding;
+    if (!embedding && query_text) {
+      console.log(`🔍 [Hybrid Search] Generating embedding for query: "${query_text.substring(0, 50)}..."`);
+      embedding = await generateEmbedding(query_text);
+    }
+
+    if (!embedding) {
+      return res.status(500).json(error('Failed to generate embedding'));
+    }
+
+    // Use the hybrid_search_contexts function from migration
+    const result = await db.query(
+      `SELECT * FROM hybrid_search_contexts(
+        $1::TEXT,
+        $2::vector(384),
+        $3::UUID,
+        $4::INT,
+        $5::DECIMAL
+      )`,
+      [query_text, `[${embedding.join(',')}]`, userId, limit, semantic_weight]
+    );
+
+    return res.json(success({ results: result.rows }));
+  } catch (err) {
+    console.error('Hybrid search error:', err);
     return res.status(500).json(error(err.message, 500));
   }
 }

@@ -42,7 +42,8 @@ import {
   getEffectivenessMetrics,
   trackUsage,
   getAssociations,
-  queueEmbeddingGeneration
+  queueEmbeddingGeneration,
+  hybridSearch
 } from './search.js';
 
 /**
@@ -150,6 +151,11 @@ export default async function contextsRouter(req, res, pathParts) {
     // POST /api/contexts/search
     if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'search') {
       return await semanticSearch(req, res);
+    }
+
+    // POST /api/contexts/hybrid-search
+    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'hybrid-search') {
+      return await hybridSearch(req, res);
     }
 
     // POST /api/contexts/recommend
