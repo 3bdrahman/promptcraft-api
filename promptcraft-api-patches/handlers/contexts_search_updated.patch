@@ -1,0 +1,39 @@
+--- a/src/routes/handlers/contexts/search.js
++++ b/src/routes/handlers/contexts/search.js
+@@ -6,7 +6,7 @@
+ import { db } from '../../../utils/database.js';
+ import { getUserId } from '../../../utils/auth.js';
+ import { success, error } from '../../../utils/responses.js';
+-import { generateEmbedding } from '../../../services/embeddingService.js';
++import { generateEmbedding } from '../../../services/localEmbeddingService.js';
+
+ /**
+  * POST /api/contexts/search
+@@ -145,10 +145,17 @@ export async function findSimilar(req, res, contextId) {
+
+     // Verify ownership and get embedding
+     const contextResult = await db.query(
+-      `SELECT id, name, embedding
+-       FROM context_layers
++      `SELECT cl.id, cl.name, ce.embedding
++       FROM context_layers cl
++       LEFT JOIN context_embeddings ce ON cl.id = ce.context_id
+        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+       [contextId, userId]
+     );
+
+     if (contextResult.rows.length === 0) {
+@@ -394,11 +401,11 @@ export async function queueEmbeddingGeneration(req, res, contextId) {
+
+     // Add to queue
+     const result = await db.query(
+-      `INSERT INTO embedding_generation_queue (context_id, priority, status)
++      `INSERT INTO embedding_queue (resource_type, resource_id, priority, status)
+-       VALUES ($1, $2, 'pending')
+-       ON CONFLICT (context_id, status)
++       VALUES ('context', $1, $2, 'pending')
++       ON CONFLICT (resource_type, resource_id, status)
+        DO UPDATE SET priority = $2, attempts = 0
+        RETURNING *`,
+       [contextId, priority]
+     );
