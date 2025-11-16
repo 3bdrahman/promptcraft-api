@@ -60,6 +60,15 @@ import aiGenerateHandler from './handlers/ai/generate.js';
 import aiEmbeddingsHandler from './handlers/ai/embeddings.js';
 import aiProvidersHandler from './handlers/ai/providers.js';
 
+// Embedding queue management
+import {
+  getQueueStatus,
+  processQueue,
+  removeFromQueue,
+  retryQueueItem,
+  clearQueue
+} from './handlers/embeddings/queue.js';
+
 const router = express.Router();
 
 // Helper to wrap async handlers
@@ -144,6 +153,15 @@ router.post('/ai/embeddings', asyncHandler(aiEmbeddingsHandler));
 router.get('/ai/providers', asyncHandler(aiProvidersHandler));
 
 // ============================================
+// Embedding Queue Management Routes
+// ============================================
+router.get('/embeddings/queue', asyncHandler(getQueueStatus));
+router.post('/embeddings/queue/process', asyncHandler(processQueue));
+router.post('/embeddings/queue/clear', asyncHandler(clearQueue));
+router.delete('/embeddings/queue/:id', asyncHandler((req, res) => removeFromQueue(req, res, req.params.id)));
+router.post('/embeddings/queue/:id/retry', asyncHandler((req, res) => retryQueueItem(req, res, req.params.id)));
+
+// ============================================
 // Root API Info
 // ============================================
 router.get('/', (req, res) => {
@@ -183,6 +201,23 @@ router.get('/', (req, res) => {
         'POST /api/ai/generate',
         'POST /api/ai/embeddings',
         'GET /api/ai/providers'
+      ],
+      embeddings: [
+        'GET /api/embeddings/queue',
+        'POST /api/embeddings/queue/process',
+        'POST /api/embeddings/queue/clear',
+        'DELETE /api/embeddings/queue/:id',
+        'POST /api/embeddings/queue/:id/retry'
+      ],
+      search: [
+        'POST /api/contexts/search',
+        'POST /api/contexts/hybrid-search',
+        'POST /api/contexts/recommend',
+        'GET /api/contexts/layers/:id/similar',
+        'POST /api/contexts/layers/:id/generate-embedding',
+        'POST /api/templates/search',
+        'GET /api/templates/:id/similar',
+        'POST /api/templates/:id/generate-embedding'
       ]
     }
   });

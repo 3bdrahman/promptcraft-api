@@ -9,6 +9,11 @@ import {
   getFilteredCategories,
   isValidCategory
 } from '../../utils/category-helpers.js';
+import {
+  semanticTemplateSearch,
+  findSimilarTemplates,
+  queueTemplateEmbeddingGeneration
+} from './templates/search.js';
 
 export default async function handler(req, res) {
   // Handle CORS
@@ -91,6 +96,21 @@ export default async function handler(req, res) {
     // GET /templates/:id/dependents - Get what depends on this template
     if (method === 'GET' && pathParts.length === 3 && pathParts[2] === 'dependents') {
       return await getTemplateDependents(req, res, pathParts[1]);
+    }
+
+    // POST /templates/search - Semantic search for templates
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'search') {
+      return await semanticTemplateSearch(req, res);
+    }
+
+    // GET /templates/:id/similar - Find similar templates
+    if (method === 'GET' && pathParts.length === 3 && pathParts[2] === 'similar') {
+      return await findSimilarTemplates(req, res, pathParts[1]);
+    }
+
+    // POST /templates/:id/generate-embedding - Queue template for embedding generation
+    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'generate-embedding') {
+      return await queueTemplateEmbeddingGeneration(req, res, pathParts[1]);
     }
 
     // GET /templates/:id/suggested-contexts - Get suggested contexts for template
