@@ -110,9 +110,9 @@ export async function enqueueEmbeddings(req, res) {
 
     // Validate contexts belong to user
     const validContexts = await db.query(
-      `SELECT context_id
+      `SELECT id as context_id
        FROM context_layers
-       WHERE context_id = ANY($1) AND user_id = $2`,
+       WHERE id = ANY($1) AND user_id = $2`,
       [context_ids, userId]
     );
 
@@ -196,7 +196,7 @@ export async function processEmbeddingQueue(req, res) {
          cl.content,
          cl.name
        FROM embedding_queue eq
-       INNER JOIN context_layers cl ON cl.context_id = eq.context_id
+       INNER JOIN context_layers cl ON cl.id = eq.context_id
        WHERE eq.status = 'pending'
        ORDER BY
          CASE WHEN eq.user_id = $1 THEN 0 ELSE 1 END,

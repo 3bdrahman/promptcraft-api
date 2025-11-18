@@ -47,7 +47,7 @@ export async function semanticSearchContexts(req, res) {
     // Search contexts using vector similarity
     const searchResults = await db.query(
       `SELECT
-         cl.context_id,
+         cl.id as context_id,
          cl.name as context_name,
          cl.layer_type,
          cl.description,
@@ -56,11 +56,11 @@ export async function semanticSearchContexts(req, res) {
          SUBSTRING(cl.content, 1, 200) as content_preview,
          1 - (ce.embedding <=> $1::vector(384)) as similarity
        FROM context_layers cl
-       INNER JOIN context_embeddings ce ON ce.context_id = cl.context_id
+       INNER JOIN context_embeddings ce ON ce.context_id = cl.id
        WHERE cl.user_id = $2
          AND cl.is_active = true
          AND (1 - (ce.embedding <=> $1::vector(384))) >= $3
-         AND cl.context_id != ALL($4::UUID[])
+         AND cl.id != ALL($4::UUID[])
        ORDER BY similarity DESC
        LIMIT $5`,
       [
@@ -118,7 +118,7 @@ export async function findSimilarContexts(req, res) {
     const sourceContext = await db.query(
       `SELECT ce.embedding, cl.name
        FROM context_embeddings ce
-       INNER JOIN context_layers cl ON cl.context_id = ce.context_id
+       INNER JOIN context_layers cl ON cl.id = ce.context_id
        WHERE ce.context_id = $1 AND cl.user_id = $2`,
       [id, userId]
     );
@@ -133,7 +133,7 @@ export async function findSimilarContexts(req, res) {
     // Find similar contexts
     const similarResults = await db.query(
       `SELECT
-         cl.context_id,
+         cl.id as context_id,
          cl.name as context_name,
          cl.layer_type,
          cl.description,
@@ -142,10 +142,10 @@ export async function findSimilarContexts(req, res) {
          SUBSTRING(cl.content, 1, 200) as content_preview,
          1 - (ce.embedding <=> $1) as similarity
        FROM context_layers cl
-       INNER JOIN context_embeddings ce ON ce.context_id = cl.context_id
+       INNER JOIN context_embeddings ce ON ce.context_id = cl.id
        WHERE cl.user_id = $2
          AND cl.is_active = true
-         AND cl.context_id != $3
+         AND cl.id != $3
          AND (1 - (ce.embedding <=> $1)) >= $4
        ORDER BY similarity DESC
        LIMIT $5`,

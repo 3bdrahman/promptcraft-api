@@ -46,6 +46,43 @@ import {
   queueEmbeddingGeneration
 } from './search.js';
 
+// Import conversational builder handlers
+import {
+  startConversation,
+  sendMessage,
+  saveConversationContexts,
+  getConversationHistory
+} from './conversational_builder.js';
+
+// Import extraction handlers
+import {
+  extractFromFile,
+  extractFromText,
+  extractFromURL,
+  extractFromRepo
+} from './extraction.js';
+
+// Import predictive engine handlers
+import {
+  getPredictions,
+  trackUsage as trackPredictiveUsage,
+  getPatterns
+} from './predictive.js';
+
+// Import compression engine handlers
+import {
+  compressContexts,
+  applyCompressions,
+  getCompressionAnalytics
+} from './compression.js';
+
+// Import knowledge graph handlers
+import {
+  generateGraph,
+  findPaths,
+  getNeighbors
+} from './knowledge_graph.js';
+
 const router = express.Router();
 
 // Helper to wrap async handlers
@@ -187,6 +224,111 @@ router.get('/associations', asyncHandler(async (req, res) => {
 // POST /api/contexts/layers/:id/generate-embedding
 router.post('/layers/:id/generate-embedding', asyncHandler(async (req, res) => {
   return await queueEmbeddingGeneration(req, res, req.params.id);
+}));
+
+// ============================================
+// CONVERSATIONAL CONTEXT BUILDER
+// ============================================
+
+// POST /api/contexts/conversation/start
+router.post('/conversation/start', asyncHandler(async (req, res) => {
+  return await startConversation(req, res);
+}));
+
+// POST /api/contexts/conversation/message
+router.post('/conversation/message', asyncHandler(async (req, res) => {
+  return await sendMessage(req, res);
+}));
+
+// POST /api/contexts/conversation/save
+router.post('/conversation/save', asyncHandler(async (req, res) => {
+  return await saveConversationContexts(req, res);
+}));
+
+// GET /api/contexts/conversation/:sessionId
+router.get('/conversation/:sessionId', asyncHandler(async (req, res) => {
+  return await getConversationHistory(req, res);
+}));
+
+// ============================================
+// CONTEXT EXTRACTION (UNIVERSAL SMART IMPORT)
+// ============================================
+
+// POST /api/extraction/from-file
+router.post('/extraction/from-file', asyncHandler(async (req, res) => {
+  return await extractFromFile(req, res);
+}));
+
+// POST /api/extraction/from-text
+router.post('/extraction/from-text', asyncHandler(async (req, res) => {
+  return await extractFromText(req, res);
+}));
+
+// POST /api/extraction/from-url
+router.post('/extraction/from-url', asyncHandler(async (req, res) => {
+  return await extractFromURL(req, res);
+}));
+
+// POST /api/extraction/from-repo
+router.post('/extraction/from-repo', asyncHandler(async (req, res) => {
+  return await extractFromRepo(req, res);
+}));
+
+// ============================================
+// PREDICTIVE CONTEXT ENGINE
+// ============================================
+
+// POST /api/contexts/predictive/predict
+router.post('/predictive/predict', asyncHandler(async (req, res) => {
+  return await getPredictions(req, res);
+}));
+
+// POST /api/contexts/predictive/track
+router.post('/predictive/track', asyncHandler(async (req, res) => {
+  return await trackPredictiveUsage(req, res);
+}));
+
+// GET /api/contexts/predictive/patterns
+router.get('/predictive/patterns', asyncHandler(async (req, res) => {
+  return await getPatterns(req, res);
+}));
+
+// ============================================
+// COMPRESSION ENGINE
+// ============================================
+
+// POST /api/contexts/compress
+router.post('/compress', asyncHandler(async (req, res) => {
+  return await compressContexts(req, res);
+}));
+
+// POST /api/contexts/compress/apply
+router.post('/compress/apply', asyncHandler(async (req, res) => {
+  return await applyCompressions(req, res);
+}));
+
+// GET /api/contexts/compress/analytics
+router.get('/compress/analytics', asyncHandler(async (req, res) => {
+  return await getCompressionAnalytics(req, res);
+}));
+
+// ============================================
+// KNOWLEDGE GRAPH
+// ============================================
+
+// POST /api/contexts/graph/generate
+router.post('/graph/generate', asyncHandler(async (req, res) => {
+  return await generateGraph(req, res);
+}));
+
+// POST /api/contexts/graph/paths
+router.post('/graph/paths', asyncHandler(async (req, res) => {
+  return await findPaths(req, res);
+}));
+
+// GET /api/contexts/graph/neighbors/:contextId
+router.get('/graph/neighbors/:contextId', asyncHandler(async (req, res) => {
+  return await getNeighbors(req, res);
 }));
 
 export default router;

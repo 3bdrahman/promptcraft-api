@@ -57,7 +57,7 @@ export async function autoComposeContexts(req, res) {
     const candidates = await db.query(
       `WITH context_scores AS (
          SELECT
-           cl.context_id,
+           cl.id as context_id,
            cl.name,
            cl.layer_type,
            cl.description,
@@ -78,7 +78,7 @@ export async function autoComposeContexts(req, res) {
            LEAST(cl.usage_count::decimal / 100, 0.15) as usage_score,
            cl.priority::decimal / 50 as priority_score
          FROM context_layers cl
-         INNER JOIN context_embeddings ce ON ce.context_id = cl.context_id
+         INNER JOIN context_embeddings ce ON ce.context_id = cl.id
          WHERE cl.user_id = $2
            AND cl.is_active = true
            AND (1 - (ce.embedding <=> $1::vector(384))) >= $3
@@ -376,7 +376,7 @@ async function resolveDependencies(contextIds, userId) {
        AND cr.relationship_type IN ('requires', 'extends')
        AND EXISTS (
          SELECT 1 FROM context_layers cl
-         WHERE cl.context_id = cr.source_id AND cl.user_id = $2
+         WHERE cl.id = cr.source_id AND cl.user_id = $2
        )`,
     [contextIds, userId]
   );

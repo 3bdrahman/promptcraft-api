@@ -44,7 +44,7 @@ export async function getAIRecommendations(req, res) {
     const recommendations = await db.query(
       `WITH context_scores AS (
          SELECT
-           cl.context_id,
+           cl.id as context_id,
            cl.name,
            cl.layer_type,
            cl.description,
@@ -67,7 +67,7 @@ export async function getAIRecommendations(req, res) {
            -- Priority score
            cl.priority::decimal / 50 as priority_score
          FROM context_layers cl
-         INNER JOIN context_embeddings ce ON ce.context_id = cl.context_id
+         INNER JOIN context_embeddings ce ON ce.context_id = cl.id
          WHERE cl.user_id = $2
            AND cl.is_active = true
            AND (1 - (ce.embedding <=> $1::vector(384))) >= 0.5
