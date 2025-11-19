@@ -3,10 +3,9 @@
  * Creates new user accounts with proper security
  */
 
-import { db, logEvent, ensureTenant } from '../../../utils/database.js';
+import { db, logEvent } from '../../../utils/database.js';
 import { success, error as createError } from '../../../utils/responses.js';
 import { hashPassword, validatePassword, validateEmail, validateUsername } from '../../../middleware/auth/password.js';
-import { generatePin, sendVerificationPin } from '../../../utils/email.js';
 
 export default async function handler(req, res) {
   // CORS headers
@@ -124,30 +123,9 @@ export default async function handler(req, res) {
 
     console.log(`✅ User created: ${email} with ID: ${user.id}, tenant: ${tenantId}`);
 
-    // ============================================================
-    // EMAIL VERIFICATION - 6-Digit PIN
-    // ============================================================
-
-    // Generate 6-digit PIN
-    const pin = generatePin();
-    const expiryMinutes = 15;
-    const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000); // 15 minutes
-
-    // Store PIN in database
-    await db.query(
-      `INSERT INTO email_verification_pins (user_id, pin, email, expires_at)
-       VALUES ($1, $2, $3, $4)`,
-      [user.id, pin, email.toLowerCase(), expiresAt]
-    );
-
-    // Send verification PIN via email
-    try {
-      await sendVerificationPin(email, pin, expiryMinutes);
-      console.log(`✅ Verification PIN sent to: ${email}`);
-    } catch (emailError) {
-      console.error(`❌ Failed to send verification email:`, emailError);
-      // Continue anyway - PIN is in database, user can request resend
-    }
+    // Note: Email verification is tracked via user.email_verified column
+    // Users start with email_verified = false
+    // They can verify later via a verification link or be auto-verified
 
     // ============================================================
     // AUDIT LOG
@@ -174,18 +152,14 @@ export default async function handler(req, res) {
     // ============================================================
 
     return res.status(201).json(success({
-      message: 'Account created successfully. Please check your email for a 6-digit verification code.',
+      message: 'Account created successfully. You can now log in.',
       user: {
         id: user.id,
         email: user.email,
         username: user.username,
         email_verified: user.email_verified,
         created_at: user.created_at
-      },
-      // For development, include PIN (remove this in production!)
-      ...(process.env.NODE_ENV === 'development' && {
-        dev_pin: pin
-      })
+      }
     }));
 
   } catch (error) {

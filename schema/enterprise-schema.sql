@@ -80,6 +80,9 @@ CREATE INDEX idx_session_user ON session(user_id) WHERE revoked_at IS NULL;
 CREATE INDEX idx_session_expires ON session(expires_at);
 CREATE INDEX idx_session_access_token ON session(access_token);
 
+-- Note: Email verification is tracked via user.email_verified column
+-- No separate verification pins table needed
+
 -- ============================================================================
 -- CORE ENTITY SYSTEM (Temporal Versioning)
 -- ============================================================================
