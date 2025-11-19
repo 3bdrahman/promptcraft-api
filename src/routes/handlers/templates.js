@@ -44,132 +44,140 @@ export default async function handler(req, res) {
   // Merge with req.query if it exists (some environments provide it pre-parsed)
   req.query = { ...query, ...req.query };
 
-  const pathParts = urlWithoutQuery.split('/').filter(Boolean);
+  // Handle both direct Vercel calls and Express router calls
+  // Express strips the /templates prefix, so we need to check both
+  let pathParts = urlWithoutQuery.split('/').filter(Boolean);
+
+  // If using Express router, pathParts won't include 'templates'
+  // If direct call (Vercel), pathParts[0] will be 'templates'
+  if (pathParts[0] === 'templates') {
+    pathParts = pathParts.slice(1); // Remove 'templates' prefix
+  }
 
   try {
     // GET /templates/schema - Debug: Show database schema
-    if (method === 'GET' && pathParts[1] === 'schema') {
+    if (method === 'GET' && pathParts[0] === 'schema') {
       return await getTableSchema(req, res);
     }
 
     // GET /templates - List all public templates
-    if (method === 'GET' && pathParts.length === 1) {
+    if (method === 'GET' && pathParts.length === 0) {
       return await getTemplates(req, res);
     }
 
     // GET /templates/favorites - Get user's favorite templates
-    if (method === 'GET' && pathParts[1] === 'favorites') {
+    if (method === 'GET' && pathParts[0] === 'favorites') {
       return await getUserFavorites(req, res);
     }
 
     // GET /templates/my-templates - Get user's private templates
-    if (method === 'GET' && pathParts[1] === 'my-templates') {
+    if (method === 'GET' && pathParts[0] === 'my-templates') {
       return await getUserTemplates(req, res);
     }
 
     // GET /templates/team/:teamId - Get team's shared templates
-    if (method === 'GET' && pathParts[1] === 'team' && pathParts.length === 3) {
-      return await getTeamTemplates(req, res, pathParts[2]);
+    if (method === 'GET' && pathParts[0] === 'team' && pathParts.length === 2) {
+      return await getTeamTemplates(req, res, pathParts[1]);
     }
 
     // POST /templates/:id/share - Share template with team
-    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'share') {
-      return await shareTemplate(req, res, pathParts[1]);
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'share') {
+      return await shareTemplate(req, res, pathParts[0]);
     }
 
     // POST /templates/:id/unshare - Unshare template (make private)
-    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'unshare') {
-      return await unshareTemplate(req, res, pathParts[1]);
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'unshare') {
+      return await unshareTemplate(req, res, pathParts[0]);
     }
 
     // GET /templates/:id/versions - Get version history
-    if (method === 'GET' && pathParts.length === 3 && pathParts[2] === 'versions') {
-      return await getTemplateVersions(req, res, pathParts[1]);
+    if (method === 'GET' && pathParts.length === 2 && pathParts[1] === 'versions') {
+      return await getTemplateVersions(req, res, pathParts[0]);
     }
 
     // GET /templates/:id/versions/:versionId - Get specific version
-    if (method === 'GET' && pathParts.length === 4 && pathParts[2] === 'versions') {
-      return await getTemplateVersion(req, res, pathParts[1], pathParts[3]);
+    if (method === 'GET' && pathParts.length === 3 && pathParts[1] === 'versions') {
+      return await getTemplateVersion(req, res, pathParts[0], pathParts[2]);
     }
 
     // POST /templates/:id/revert/:versionId - Revert to version
-    if (method === 'POST' && pathParts.length === 4 && pathParts[2] === 'revert') {
-      return await revertTemplateVersion(req, res, pathParts[1], pathParts[3]);
+    if (method === 'POST' && pathParts.length === 3 && pathParts[1] === 'revert') {
+      return await revertTemplateVersion(req, res, pathParts[0], pathParts[2]);
     }
 
     // POST /templates/:id/versions - Create manual version snapshot
-    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'versions') {
-      return await createManualTemplateVersion(req, res, pathParts[1]);
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'versions') {
+      return await createManualTemplateVersion(req, res, pathParts[0]);
     }
 
     // GET /templates/:id/dependencies - Get template dependencies
-    if (method === 'GET' && pathParts.length === 3 && pathParts[2] === 'dependencies') {
-      return await getTemplateDependencies(req, res, pathParts[1]);
+    if (method === 'GET' && pathParts.length === 2 && pathParts[1] === 'dependencies') {
+      return await getTemplateDependencies(req, res, pathParts[0]);
     }
 
     // GET /templates/:id/dependents - Get what depends on this template
-    if (method === 'GET' && pathParts.length === 3 && pathParts[2] === 'dependents') {
-      return await getTemplateDependents(req, res, pathParts[1]);
+    if (method === 'GET' && pathParts.length === 2 && pathParts[1] === 'dependents') {
+      return await getTemplateDependents(req, res, pathParts[0]);
     }
 
     // POST /templates/search - Semantic search for templates
-    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'search') {
+    if (method === 'POST' && pathParts.length === 1 && pathParts[0] === 'search') {
       return await semanticTemplateSearch(req, res);
     }
 
     // GET /templates/:id/similar - Find similar templates
-    if (method === 'GET' && pathParts.length === 3 && pathParts[2] === 'similar') {
-      return await findSimilarTemplates(req, res, pathParts[1]);
+    if (method === 'GET' && pathParts.length === 2 && pathParts[1] === 'similar') {
+      return await findSimilarTemplates(req, res, pathParts[0]);
     }
 
     // POST /templates/:id/generate-embedding - Queue template for embedding generation
-    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'generate-embedding') {
-      return await queueTemplateEmbeddingGeneration(req, res, pathParts[1]);
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'generate-embedding') {
+      return await queueTemplateEmbeddingGeneration(req, res, pathParts[0]);
     }
 
     // GET /templates/:id/suggested-contexts - Get suggested contexts for template
-    if (method === 'GET' && pathParts.length === 3 && pathParts[2] === 'suggested-contexts') {
-      return await getSuggestedContexts(req, res, pathParts[1]);
+    if (method === 'GET' && pathParts.length === 2 && pathParts[1] === 'suggested-contexts') {
+      return await getSuggestedContexts(req, res, pathParts[0]);
     }
 
     // POST /templates/:id/clone - Clone template
-    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'clone') {
-      return await cloneTemplate(req, res, pathParts[1]);
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'clone') {
+      return await cloneTemplate(req, res, pathParts[0]);
     }
 
     // POST /templates/:id/track-usage - Track template usage with context
-    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'track-usage') {
-      return await trackTemplateUsage(req, res, pathParts[1]);
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'track-usage') {
+      return await trackTemplateUsage(req, res, pathParts[0]);
     }
 
     // POST /templates/:id/render - Render template with variable substitution
-    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'render') {
-      return await renderTemplate(req, res, pathParts[1]);
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'render') {
+      return await renderTemplate(req, res, pathParts[0]);
     }
 
     // GET /templates/:id - Get single template
-    if (method === 'GET' && pathParts.length === 2 && !['favorites', 'my-templates', 'schema', 'team'].includes(pathParts[1])) {
-      return await getTemplate(req, res, pathParts[1]);
+    if (method === 'GET' && pathParts.length === 1 && !['favorites', 'my-templates', 'schema', 'team'].includes(pathParts[0])) {
+      return await getTemplate(req, res, pathParts[0]);
     }
 
     // POST /templates/:id/favorite - Toggle favorite status
-    if (method === 'POST' && pathParts.length === 3 && pathParts[2] === 'favorite') {
-      return await toggleFavorite(req, res, pathParts[1]);
+    if (method === 'POST' && pathParts.length === 2 && pathParts[1] === 'favorite') {
+      return await toggleFavorite(req, res, pathParts[0]);
     }
 
     // POST /templates - Create new template
-    if (method === 'POST' && pathParts.length === 1) {
+    if (method === 'POST' && pathParts.length === 0) {
       return await createTemplate(req, res);
     }
 
     // PUT /templates/:id - Update template
-    if (method === 'PUT' && pathParts.length === 2) {
-      return await updateTemplate(req, res, pathParts[1]);
+    if (method === 'PUT' && pathParts.length === 1) {
+      return await updateTemplate(req, res, pathParts[0]);
     }
 
     // DELETE /templates/:id - Delete template
-    if (method === 'DELETE' && pathParts.length === 2) {
-      return await deleteTemplate(req, res, pathParts[1]);
+    if (method === 'DELETE' && pathParts.length === 1) {
+      return await deleteTemplate(req, res, pathParts[0]);
     }
 
     return res.status(404).json(error('Endpoint not found', 404));
