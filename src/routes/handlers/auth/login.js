@@ -3,7 +3,7 @@
  * Authenticates users and issues JWT tokens
  */
 
-import { db } from '../../../utils/database.js';
+import { db, logEvent, ensureTenant } from '../../../utils/database.js';
 import { success, error as createError } from '../../../utils/responses.js';
 import { verifyPassword, validateEmail } from '../../../middleware/auth/password.js';
 import { generateTokenPair, hashToken } from '../../../middleware/auth/jwt.js';
@@ -59,18 +59,14 @@ export default async function handler(req, res) {
     const userResult = await client.query(
       `SELECT id, email, username, password_hash, email_verified,
               failed_login_attempts, locked_until, last_login_at
-       FROM users
+       FROM "user"
        WHERE email = $1`,
       [email.toLowerCase()]
     );
 
     if (userResult.rows.length === 0) {
-      // Log failed login attempt (no user found)
-      await client.query(
-        `INSERT INTO audit_logs (user_id, action, status, ip_address, user_agent, metadata)
-         VALUES (NULL, $1, $2, $3, $4, $5)`,
-        ['login', 'failure', ipAddress, userAgent, JSON.stringify({ reason: 'user_not_found', email })]
-      );
+      // Note: Cannot log to event table without tenant_id (user doesn't exist)
+      // Security events for non-existent users could be logged to a system-wide audit table in the future
 
       await client.query('COMMIT');
 
@@ -88,12 +84,22 @@ export default async function handler(req, res) {
       const minutesRemaining = Math.ceil((new Date(user.locked_until) - new Date()) / 60000);
 
       // Log locked account attempt
-      await client.query(
-        `INSERT INTO audit_logs (user_id, action, status, ip_address, user_agent, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [user.id, 'login', 'blocked', ipAddress, userAgent,
-         JSON.stringify({ reason: 'account_locked', minutes_remaining: minutesRemaining })]
-      );
+      const tenantId = await ensureTenant(user.id, client);
+      await logEvent({
+        tenantId,
+        eventType: 'user.login',
+        aggregateType: 'user',
+        aggregateId: user.id,
+        actorId: user.id,
+        payload: {
+          status: 'blocked',
+          reason: 'account_locked',
+          minutes_remaining: minutesRemaining,
+          ip_address: ipAddress,
+          user_agent: userAgent
+        },
+        client
+      });
 
       await client.query('COMMIT');
 
@@ -123,7 +129,7 @@ export default async function handler(req, res) {
       }
 
       await client.query(
-        `UPDATE users
+        `UPDATE "user"
          SET failed_login_attempts = $1,
              locked_until = $2,
              updated_at = NOW()
@@ -132,16 +138,23 @@ export default async function handler(req, res) {
       );
 
       // Log failed login
-      await client.query(
-        `INSERT INTO audit_logs (user_id, action, status, ip_address, user_agent, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [user.id, 'login', 'failure', ipAddress, userAgent,
-         JSON.stringify({
-           reason: 'invalid_password',
-           failed_attempts: newFailedAttempts,
-           locked: !!lockedUntil
-         })]
-      );
+      const tenantId = await ensureTenant(user.id, client);
+      await logEvent({
+        tenantId,
+        eventType: 'user.login',
+        aggregateType: 'user',
+        aggregateId: user.id,
+        actorId: user.id,
+        payload: {
+          status: 'failure',
+          reason: 'invalid_password',
+          failed_attempts: newFailedAttempts,
+          locked: !!lockedUntil,
+          ip_address: ipAddress,
+          user_agent: userAgent
+        },
+        client
+      });
 
       await client.query('COMMIT');
 
@@ -189,7 +202,7 @@ export default async function handler(req, res) {
     const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
 
     await client.query(
-      `INSERT INTO refresh_tokens (user_id, token_hash, device_info, ip_address, user_agent, expires_at)
+      `INSERT INTO session (user_id, refresh_token, device_info, ip_address, user_agent, expires_at)
        VALUES ($1, $2, $3, $4, $5, $6)`,
       [user.id, tokenHash, device_info, ipAddress, userAgent, refreshExpiresAt]
     );
@@ -199,7 +212,7 @@ export default async function handler(req, res) {
     // ============================================================
 
     await client.query(
-      `UPDATE users
+      `UPDATE "user"
        SET failed_login_attempts = 0,
            locked_until = NULL,
            last_login_at = NOW(),
@@ -212,12 +225,22 @@ export default async function handler(req, res) {
     // AUDIT LOG
     // ============================================================
 
-    await client.query(
-      `INSERT INTO audit_logs (user_id, action, status, ip_address, user_agent, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [user.id, 'login', 'success', ipAddress, userAgent,
-       JSON.stringify({ device_info, email_verified: user.email_verified })]
-    );
+    const tenantId = await ensureTenant(user.id, client);
+    await logEvent({
+      tenantId,
+      eventType: 'user.login',
+      aggregateType: 'user',
+      aggregateId: user.id,
+      actorId: user.id,
+      payload: {
+        status: 'success',
+        device_info,
+        email_verified: user.email_verified,
+        ip_address: ipAddress,
+        user_agent: userAgent
+      },
+      client
+    });
 
     await client.query('COMMIT');
 

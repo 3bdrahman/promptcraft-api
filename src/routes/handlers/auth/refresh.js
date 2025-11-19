@@ -3,7 +3,7 @@
  * Issues new access token using refresh token
  */
 
-import { db } from '../../../utils/database.js';
+import { db, logEvent, ensureTenant } from '../../../utils/database.js';
 import { success, error as createError } from '../../../utils/responses.js';
 import { verifyRefreshToken, generateAccessToken, generateRefreshToken, hashToken, getUserIdFromToken } from '../../../middleware/auth/jwt.js';
 import { getIpAddress, getUserAgent } from '../../../middleware/auth/index.js';
@@ -54,22 +54,17 @@ export default async function handler(req, res) {
     const tokenHash = hashToken(refresh_token);
 
     const tokenResult = await db.query(
-      `SELECT id, user_id, revoked, expires_at
-       FROM refresh_tokens
-       WHERE token_hash = $1`,
+      `SELECT id, user_id, revoked_at, expires_at
+       FROM session
+       WHERE refresh_token = $1`,
       [tokenHash]
     );
 
     if (tokenResult.rows.length === 0) {
       console.log('⚠️ Refresh token not found in database (possible token reuse attack)');
 
-      // Log potential security issue
-      await db.query(
-        `INSERT INTO audit_logs (user_id, action, status, metadata)
-         VALUES ($1, $2, $3, $4)`,
-        [userId, 'token_refresh', 'failure',
-         JSON.stringify({ reason: 'token_not_found', user_id: userId })]
-      );
+      // Note: Cannot log without tenant for non-existent token
+      // In production, consider logging to a system-wide security audit table
 
       return res.status(401).json(createError('Invalid refresh token', 401));
     }
@@ -77,15 +72,21 @@ export default async function handler(req, res) {
     const tokenRecord = tokenResult.rows[0];
 
     // Check if token is revoked
-    if (tokenRecord.revoked) {
+    if (tokenRecord.revoked_at) {
       console.log('⚠️ Attempted use of revoked refresh token');
 
-      await db.query(
-        `INSERT INTO audit_logs (user_id, action, status, metadata)
-         VALUES ($1, $2, $3, $4)`,
-        [userId, 'token_refresh', 'blocked',
-         JSON.stringify({ reason: 'token_revoked' })]
-      );
+      const tenantId = await ensureTenant(userId);
+      await logEvent({
+        tenantId,
+        eventType: 'user.token_refresh',
+        aggregateType: 'user',
+        aggregateId: userId,
+        actorId: userId,
+        payload: {
+          status: 'blocked',
+          reason: 'token_revoked'
+        }
+      });
 
       return res.status(401).json(createError('Refresh token has been revoked', 401));
     }
@@ -102,7 +103,7 @@ export default async function handler(req, res) {
 
     const userResult = await db.query(
       `SELECT id, email, username, email_verified
-       FROM users
+       FROM "user"
        WHERE id = $1`,
       [userId]
     );
@@ -138,8 +139,8 @@ export default async function handler(req, res) {
 
       // Revoke old refresh token
       await db.query(
-        `UPDATE refresh_tokens
-         SET revoked = TRUE, revoked_at = NOW()
+        `UPDATE session
+         SET revoked_at = NOW()
          WHERE id = $1`,
         [tokenRecord.id]
       );
@@ -148,7 +149,7 @@ export default async function handler(req, res) {
       const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
 
       await db.query(
-        `INSERT INTO refresh_tokens (user_id, token_hash, device_info, ip_address, user_agent, expires_at)
+        `INSERT INTO session (user_id, refresh_token, device_info, ip_address, user_agent, expires_at)
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [user.id, newTokenHash, deviceInfo, ipAddress, userAgent, refreshExpiresAt]
       );
@@ -164,12 +165,19 @@ export default async function handler(req, res) {
     // AUDIT LOG
     // ============================================================
 
-    await db.query(
-      `INSERT INTO audit_logs (user_id, action, status, metadata)
-       VALUES ($1, $2, $3, $4)`,
-      [user.id, 'token_refresh', 'success',
-       JSON.stringify({ device_info: deviceInfo, rotated: ROTATE_REFRESH_TOKENS })]
-    );
+    const tenantId = await ensureTenant(user.id);
+    await logEvent({
+      tenantId,
+      eventType: 'user.token_refresh',
+      aggregateType: 'user',
+      aggregateId: user.id,
+      actorId: user.id,
+      payload: {
+        status: 'success',
+        device_info: deviceInfo,
+        rotated: ROTATE_REFRESH_TOKENS
+      }
+    });
 
     // ============================================================
     // RESPONSE

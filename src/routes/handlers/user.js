@@ -8,7 +8,7 @@
  * - DELETE /api/user - Delete user account
  */
 
-import { db } from '../../utils/database.js';
+import { db, logEvent, ensureTenant } from '../../utils/database.js';
 import { getUserId, requireAuth } from '../../middleware/auth/index.js';
 import { success, error, handleCors } from '../../utils/responses.js';
 
@@ -58,7 +58,7 @@ async function getUserProfile(req, res, userId) {
     // Get user basic info
     const userResult = await db.query(
       `SELECT id, username, email, name, created_at, updated_at
-       FROM users WHERE id = $1`,
+       FROM "user" WHERE id = $1`,
       [userId]
     );
 
@@ -68,9 +68,9 @@ async function getUserProfile(req, res, userId) {
 
     const user = userResult.rows[0];
 
-    // Get settings (stored as JSONB in users table)
+    // Get settings (stored as JSONB in user table)
     const settingsResult = await db.query(
-      'SELECT settings FROM users WHERE id = $1',
+      'SELECT settings FROM "user" WHERE id = $1',
       [userId]
     );
 
@@ -153,7 +153,7 @@ async function updateUserProfile(req, res, userId) {
     let userResult;
     if (updates.length > 1) { // More than just updated_at
       userResult = await db.query(
-        `UPDATE users
+        `UPDATE "user"
          SET ${updates.join(', ')}
          WHERE id = $1
          RETURNING id, username, email, name, settings, created_at, updated_at`,
@@ -163,7 +163,7 @@ async function updateUserProfile(req, res, userId) {
       // Just fetch current user if no updates
       userResult = await db.query(
         `SELECT id, username, email, name, settings, created_at, updated_at
-         FROM users WHERE id = $1`,
+         FROM "user" WHERE id = $1`,
         [userId]
       );
     }
@@ -174,7 +174,7 @@ async function updateUserProfile(req, res, userId) {
 
       // Verify current password
       const passwordResult = await db.query(
-        'SELECT password_hash FROM users WHERE id = $1',
+        'SELECT password_hash FROM "user" WHERE id = $1',
         [userId]
       );
 
@@ -193,7 +193,7 @@ async function updateUserProfile(req, res, userId) {
 
       // Update password
       await db.query(
-        'UPDATE users SET password_hash = $1 WHERE id = $2',
+        'UPDATE "user" SET password_hash = $1 WHERE id = $2',
         [newHash, userId]
       );
     }
@@ -217,6 +217,23 @@ async function updateUserProfile(req, res, userId) {
 
     const updatedUser = userResult.rows[0];
 
+    // Log the profile update event
+    try {
+      const tenantId = await ensureTenant(userId);
+      await logEvent(tenantId, 'user.profile_updated', {
+        userId,
+        changes: {
+          name: name !== undefined ? name : undefined,
+          email: email !== undefined ? email : undefined,
+          settings: settings !== undefined ? true : undefined,
+          password: currentPassword && newPassword ? true : undefined
+        }
+      });
+    } catch (logErr) {
+      console.error('Failed to log profile update event:', logErr);
+      // Continue with response even if logging fails
+    }
+
     return res.json(success({
       ...updatedUser,
       message: 'Profile updated successfully'
@@ -236,13 +253,25 @@ async function deleteUserAccount(req, res, userId) {
   try {
     // Soft delete - mark as deleted but keep data
     await db.query(
-      `UPDATE users
+      `UPDATE "user"
        SET deleted_at = NOW(),
            email = CONCAT(email, '.deleted.', id),
            updated_at = NOW()
        WHERE id = $1`,
       [userId]
     );
+
+    // Log the account deletion event
+    try {
+      const tenantId = await ensureTenant(userId);
+      await logEvent(tenantId, 'user.deleted', {
+        userId,
+        timestamp: new Date().toISOString()
+      });
+    } catch (logErr) {
+      console.error('Failed to log user deletion event:', logErr);
+      // Continue with response even if logging fails
+    }
 
     return res.json(success({
       deleted: true,

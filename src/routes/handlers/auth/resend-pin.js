@@ -3,7 +3,7 @@
  * Resends verification PIN to user's email
  */
 
-import { db } from '../../../utils/database.js';
+import { db, logEvent, ensureTenant } from '../../../utils/database.js';
 import { success, error as createError } from '../../../utils/responses.js';
 // import { generatePin, // sendVerificationPin } from '../../../utils/email.js';
 
@@ -40,7 +40,7 @@ export default async function handler(req, res) {
 
     const userResult = await db.query(
       `SELECT id, email, username, email_verified
-       FROM users
+       FROM "user"
        WHERE email = $1`,
       [email.toLowerCase()]
     );
@@ -126,18 +126,20 @@ export default async function handler(req, res) {
     // AUDIT LOG
     // ============================================================
 
-    await db.query(
-      `INSERT INTO audit_logs (user_id, action, status, ip_address, user_agent, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        user.id,
-        'resend_pin',
-        'success',
-        req.headers['x-forwarded-for'] || req.connection?.remoteAddress,
-        req.headers['user-agent'],
-        JSON.stringify({ email })
-      ]
-    );
+    const tenantId = await ensureTenant(user.id);
+    await logEvent({
+      tenantId,
+      eventType: 'user.resend_pin',
+      aggregateType: 'user',
+      aggregateId: user.id,
+      actorId: user.id,
+      payload: {
+        status: 'success',
+        email,
+        ip_address: req.headers['x-forwarded-for'] || req.connection?.remoteAddress,
+        user_agent: req.headers['user-agent']
+      }
+    });
 
     // ============================================================
     // RESPONSE
