@@ -77,7 +77,7 @@ export default async function handler(req, res) {
 
     // GET /templates/team/:teamId - Get team's shared templates
     if (method === 'GET' && pathParts[0] === 'team' && pathParts.length === 2) {
-      return await getTeamTemplates(req, res, pathParts[0]);
+      return await getTeamTemplates(req, res, pathParts[1]);
     }
 
     // POST /templates/:id/share - Share template with team
