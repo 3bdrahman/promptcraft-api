@@ -44,7 +44,15 @@ export default async function handler(req, res) {
   // Merge with req.query if it exists (some environments provide it pre-parsed)
   req.query = { ...query, ...req.query };
 
-  const pathParts = urlWithoutQuery.split('/').filter(Boolean);
+  // Handle both direct Vercel calls and Express router calls
+  // Express strips the /templates prefix, so we need to check both
+  let pathParts = urlWithoutQuery.split('/').filter(Boolean);
+
+  // If using Express router, pathParts won't include 'templates'
+  // If direct call (Vercel), pathParts[0] will be 'templates'
+  if (pathParts[0] === 'templates') {
+    pathParts = pathParts.slice(1); // Remove 'templates' prefix
+  }
 
   try {
     // GET /templates/schema - Debug: Show database schema
@@ -53,23 +61,23 @@ export default async function handler(req, res) {
     }
 
     // GET /templates - List all public templates
-    if (method === 'GET' && pathParts.length === 1) {
+    if (method === 'GET' && pathParts.length === 0) {
       return await getTemplates(req, res);
     }
 
     // GET /templates/favorites - Get user's favorite templates
-    if (method === 'GET' && pathParts[1] === 'favorites') {
+    if (method === 'GET' && pathParts[0] === 'favorites') {
       return await getUserFavorites(req, res);
     }
 
     // GET /templates/my-templates - Get user's private templates
-    if (method === 'GET' && pathParts[1] === 'my-templates') {
+    if (method === 'GET' && pathParts[0] === 'my-templates') {
       return await getUserTemplates(req, res);
     }
 
     // GET /templates/team/:teamId - Get team's shared templates
-    if (method === 'GET' && pathParts[1] === 'team' && pathParts.length === 3) {
-      return await getTeamTemplates(req, res, pathParts[2]);
+    if (method === 'GET' && pathParts[0] === 'team' && pathParts.length === 2) {
+      return await getTeamTemplates(req, res, pathParts[1]);
     }
 
     // POST /templates/:id/share - Share template with team
@@ -158,18 +166,18 @@ export default async function handler(req, res) {
     }
 
     // POST /templates - Create new template
-    if (method === 'POST' && pathParts.length === 1) {
+    if (method === 'POST' && pathParts.length === 0) {
       return await createTemplate(req, res);
     }
 
     // PUT /templates/:id - Update template
-    if (method === 'PUT' && pathParts.length === 2) {
-      return await updateTemplate(req, res, pathParts[1]);
+    if (method === 'PUT' && pathParts.length === 1) {
+      return await updateTemplate(req, res, pathParts[0]);
     }
 
     // DELETE /templates/:id - Delete template
-    if (method === 'DELETE' && pathParts.length === 2) {
-      return await deleteTemplate(req, res, pathParts[1]);
+    if (method === 'DELETE' && pathParts.length === 1) {
+      return await deleteTemplate(req, res, pathParts[0]);
     }
 
     return res.status(404).json(error('Endpoint not found', 404));
