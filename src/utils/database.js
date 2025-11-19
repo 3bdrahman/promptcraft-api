@@ -61,24 +61,39 @@ export async function ensureTenant(userId, client = null) {
   try {
     // Check if user already has a tenant
     const userResult = await executor.query(
-      'SELECT tenant_id FROM "user" WHERE id = $1',
+      'SELECT tenant_id, username FROM "user" WHERE id = $1',
       [userId]
     );
 
-    if (userResult.rows.length > 0 && userResult.rows[0].tenant_id) {
-      return userResult.rows[0].tenant_id;
+    if (userResult.rows.length === 0) {
+      throw new Error(`User ${userId} not found`);
     }
 
-    // Create default tenant for user
+    const user = userResult.rows[0];
+
+    // If user already has a tenant, return it
+    if (user.tenant_id) {
+      return user.tenant_id;
+    }
+
+    // Create default tenant for user (for old users migrated from previous schema)
     const tenantResult = await executor.query(
       `INSERT INTO tenant (name, slug, settings)
        VALUES ($1, $2, $3)
        ON CONFLICT (slug) DO UPDATE SET slug = tenant.slug
        RETURNING id`,
-      [`User ${userId} Workspace`, `user-${userId}`, {}]
+      [`${user.username || 'User'}'s Workspace`, `user-${userId}`, {}]
     );
 
-    return tenantResult.rows[0].id;
+    const tenantId = tenantResult.rows[0].id;
+
+    // Update user with tenant_id
+    await executor.query(
+      'UPDATE "user" SET tenant_id = $1 WHERE id = $2',
+      [tenantId, userId]
+    );
+
+    return tenantId;
   } catch (error) {
     console.error('Error ensuring tenant:', error);
     throw error;
