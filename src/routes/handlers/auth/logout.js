@@ -3,7 +3,7 @@
  * Revokes refresh token and logs logout event
  */
 
-import { db } from '../../../utils/database.js';
+import { db, logEvent, ensureTenant } from '../../../utils/database.js';
 import { success, error as createError } from '../../../utils/responses.js';
 import { hashToken, getUserIdFromToken } from '../../../middleware/auth/jwt.js';
 import { getIpAddress, getUserAgent } from '../../../middleware/auth/index.js';
@@ -40,9 +40,9 @@ export default async function handler(req, res) {
     const tokenHash = hashToken(refresh_token);
 
     const result = await db.query(
-      `UPDATE refresh_tokens
-       SET revoked = TRUE, revoked_at = NOW()
-       WHERE token_hash = $1 AND revoked = FALSE
+      `UPDATE session
+       SET revoked_at = NOW()
+       WHERE refresh_token = $1 AND revoked_at IS NULL
        RETURNING id, user_id`,
       [tokenHash]
     );
@@ -66,11 +66,19 @@ export default async function handler(req, res) {
     const ipAddress = getIpAddress(req);
     const userAgent = getUserAgent(req);
 
-    await db.query(
-      `INSERT INTO audit_logs (user_id, action, status, ip_address, user_agent)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [token.user_id, 'logout', 'success', ipAddress, userAgent]
-    );
+    const tenantId = await ensureTenant(token.user_id);
+    await logEvent({
+      tenantId,
+      eventType: 'user.logout',
+      aggregateType: 'user',
+      aggregateId: token.user_id,
+      actorId: token.user_id,
+      payload: {
+        status: 'success',
+        ip_address: ipAddress,
+        user_agent: userAgent
+      }
+    });
 
     console.log(`✅ User logged out: ${token.user_id}`);
 

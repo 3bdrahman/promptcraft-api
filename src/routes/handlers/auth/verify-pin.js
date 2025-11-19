@@ -3,7 +3,7 @@
  * Verifies 6-digit email verification PIN and auto-logs in the user
  */
 
-import { db } from '../../../utils/database.js';
+import { db, logEvent, ensureTenant } from '../../../utils/database.js';
 import { success, error as createError } from '../../../utils/responses.js';
 import { sendWelcomeEmail } from '../../../utils/email.js';
 import { generateTokenPair, hashToken } from '../../../middleware/auth/jwt.js';
@@ -74,7 +74,7 @@ export default async function handler(req, res) {
         u.username,
         u.email_verified
        FROM email_verification_pins vp
-       JOIN users u ON u.id = vp.user_id
+       JOIN "user" u ON u.id = vp.user_id
        WHERE vp.email = $1
          AND vp.verified = FALSE
        ORDER BY vp.created_at DESC
@@ -120,22 +120,22 @@ export default async function handler(req, res) {
       const remainingAttempts = pinRecord.max_attempts - pinRecord.attempts - 1;
 
       // Log failed attempt
-      await db.query(
-        `INSERT INTO audit_logs (user_id, action, status, ip_address, user_agent, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [
-          pinRecord.user_id,
-          'verify_pin',
-          'failure',
-          req.headers['x-forwarded-for'] || req.connection?.remoteAddress,
-          req.headers['user-agent'],
-          JSON.stringify({
-            reason: 'invalid_pin',
-            attempts: pinRecord.attempts + 1,
-            remaining: remainingAttempts
-          })
-        ]
-      );
+      const tenantId = await ensureTenant(pinRecord.user_id);
+      await logEvent({
+        tenantId,
+        eventType: 'user.verify',
+        aggregateType: 'user',
+        aggregateId: pinRecord.user_id,
+        actorId: pinRecord.user_id,
+        payload: {
+          status: 'failure',
+          reason: 'invalid_pin',
+          attempts: pinRecord.attempts + 1,
+          remaining: remainingAttempts,
+          ip_address: req.headers['x-forwarded-for'] || req.connection?.remoteAddress,
+          user_agent: req.headers['user-agent']
+        }
+      });
 
       return res.status(400).json(createError(
         `Invalid PIN. ${remainingAttempts} attempt${remainingAttempts !== 1 ? 's' : ''} remaining.`,
@@ -157,7 +157,7 @@ export default async function handler(req, res) {
 
     // Mark user's email as verified and update last login
     await db.query(
-      `UPDATE users
+      `UPDATE "user"
        SET email_verified = TRUE,
            email_verified_at = NOW(),
            last_login_at = NOW(),
@@ -181,7 +181,7 @@ export default async function handler(req, res) {
     // Get full user object for token generation
     const userResult = await db.query(
       `SELECT id, email, username, email_verified, created_at
-       FROM users WHERE id = $1`,
+       FROM "user" WHERE id = $1`,
       [pinRecord.user_id]
     );
 
@@ -195,7 +195,7 @@ export default async function handler(req, res) {
     const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
 
     await db.query(
-      `INSERT INTO refresh_tokens (user_id, token_hash, device_info, ip_address, user_agent, expires_at)
+      `INSERT INTO session (user_id, refresh_token, device_info, ip_address, user_agent, expires_at)
        VALUES ($1, $2, $3, $4, $5, $6)`,
       [user.id, tokenHash, deviceInfo, ipAddress, userAgent, refreshExpiresAt]
     );
@@ -215,18 +215,21 @@ export default async function handler(req, res) {
     // AUDIT LOG
     // ============================================================
 
-    await db.query(
-      `INSERT INTO audit_logs (user_id, action, status, ip_address, user_agent, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        pinRecord.user_id,
-        'verify_pin',
-        'success',
-        ipAddress,
-        userAgent,
-        JSON.stringify({ email_verified: true, auto_login: true })
-      ]
-    );
+    const tenantId = await ensureTenant(user.id);
+    await logEvent({
+      tenantId,
+      eventType: 'user.verify',
+      aggregateType: 'user',
+      aggregateId: user.id,
+      actorId: user.id,
+      payload: {
+        status: 'success',
+        email_verified: true,
+        auto_login: true,
+        ip_address: ipAddress,
+        user_agent: userAgent
+      }
+    });
 
     // ============================================================
     // RESPONSE - Auto-login with tokens

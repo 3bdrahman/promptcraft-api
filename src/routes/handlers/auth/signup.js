@@ -3,7 +3,7 @@
  * Creates new user accounts with proper security
  */
 
-import { db } from '../../../utils/database.js';
+import { db, logEvent, ensureTenant } from '../../../utils/database.js';
 import { success, error as createError } from '../../../utils/responses.js';
 import { hashPassword, validatePassword, validateEmail, validateUsername } from '../../../middleware/auth/password.js';
 import { generatePin, sendVerificationPin } from '../../../utils/email.js';
@@ -70,7 +70,7 @@ export default async function handler(req, res) {
     // ============================================================
 
     const existingUser = await db.query(
-      'SELECT id, email, username FROM users WHERE email = $1 OR username = $2',
+      'SELECT id, email, username FROM "user" WHERE email = $1 OR username = $2',
       [email.toLowerCase(), username]
     );
 
@@ -93,16 +93,15 @@ export default async function handler(req, res) {
     // Hash password
     const passwordHash = await hashPassword(password);
 
-    // Insert user (set both verified and email_verified for legacy schema compatibility)
+    // Insert user
     const result = await db.query(
-      `INSERT INTO users (
+      `INSERT INTO "user" (
         email,
         username,
         password_hash,
-        verified,
         email_verified,
         created_at
-      ) VALUES ($1, $2, $3, $4, $4, NOW())
+      ) VALUES ($1, $2, $3, $4, NOW())
       RETURNING id, email, username, email_verified, created_at`,
       [email.toLowerCase(), username, passwordHash, false]
     );
@@ -140,18 +139,21 @@ export default async function handler(req, res) {
     // AUDIT LOG
     // ============================================================
 
-    await db.query(
-      `INSERT INTO audit_logs (user_id, action, status, ip_address, user_agent, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        user.id,
-        'signup',
-        'success',
-        req.headers['x-forwarded-for'] || req.connection?.remoteAddress,
-        req.headers['user-agent'],
-        JSON.stringify({ source, email_verified: false })
-      ]
-    );
+    const tenantId = await ensureTenant(user.id);
+    await logEvent({
+      tenantId,
+      eventType: 'user.signup',
+      aggregateType: 'user',
+      aggregateId: user.id,
+      actorId: user.id,
+      payload: {
+        status: 'success',
+        source,
+        email_verified: false,
+        ip_address: req.headers['x-forwarded-for'] || req.connection?.remoteAddress,
+        user_agent: req.headers['user-agent']
+      }
+    });
 
     // ============================================================
     // RESPONSE

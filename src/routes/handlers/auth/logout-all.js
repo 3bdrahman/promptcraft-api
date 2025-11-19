@@ -4,7 +4,7 @@
  * Requires valid access token
  */
 
-import { db } from '../../../utils/database.js';
+import { db, logEvent, ensureTenant } from '../../../utils/database.js';
 import { success, error as createError } from '../../../utils/responses.js';
 import { authenticateToken, getIpAddress, getUserAgent } from '../../../middleware/auth/index.js';
 
@@ -24,9 +24,9 @@ async function handler(req, res) {
     // ============================================================
 
     const result = await db.query(
-      `UPDATE refresh_tokens
-       SET revoked = TRUE, revoked_at = NOW()
-       WHERE user_id = $1 AND revoked = FALSE
+      `UPDATE session
+       SET revoked_at = NOW()
+       WHERE user_id = $1 AND revoked_at IS NULL
        RETURNING id`,
       [userId]
     );
@@ -42,12 +42,21 @@ async function handler(req, res) {
     const ipAddress = getIpAddress(req);
     const userAgent = getUserAgent(req);
 
-    await db.query(
-      `INSERT INTO audit_logs (user_id, action, status, ip_address, user_agent, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [userId, 'logout_all', 'success', ipAddress, userAgent,
-       JSON.stringify({ revoked_count: revokedCount })]
-    );
+    const tenantId = await ensureTenant(userId);
+    await logEvent({
+      tenantId,
+      eventType: 'user.logout',
+      aggregateType: 'user',
+      aggregateId: userId,
+      actorId: userId,
+      payload: {
+        status: 'success',
+        all_devices: true,
+        revoked_count: revokedCount,
+        ip_address: ipAddress,
+        user_agent: userAgent
+      }
+    });
 
     // ============================================================
     // RESPONSE
