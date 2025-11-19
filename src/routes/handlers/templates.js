@@ -1,4 +1,19 @@
-import { db } from '../../utils/database.js';
+/**
+ * Templates API - Updated for Enterprise Schema
+ * Uses universal entity table with entity_type = 'template'
+ * Supports temporal versioning and event sourcing
+ */
+
+import {
+  db,
+  ensureTenant,
+  createEntity,
+  updateEntity,
+  deleteEntity,
+  getCurrentEntity,
+  trackUsage,
+  logEvent
+} from '../../utils/database.js';
 import { getUserId, requireAuth } from '../../middleware/auth/index.js';
 import { success, error, paginated, handleCors } from '../../utils/responses.js';
 import { TEMPLATE_CATEGORIES } from '@promptcraft/shared/constants';
@@ -22,7 +37,6 @@ export default async function handler(req, res) {
   const { method, url } = req;
 
   // Parse URL and query parameters properly
-  // In Express, /api prefix is already stripped by app.use('/api', router)
   const urlObj = new URL(url, `https://${req.headers.host || 'localhost'}`);
   const urlWithoutQuery = urlObj.pathname;
   const query = Object.fromEntries(urlObj.searchParams);
@@ -157,9 +171,9 @@ export default async function handler(req, res) {
     if (method === 'DELETE' && pathParts.length === 2) {
       return await deleteTemplate(req, res, pathParts[1]);
     }
-    
+
     return res.status(404).json(error('Endpoint not found', 404));
-    
+
   } catch (err) {
     console.error('API Error:', err);
     return res.status(500).json(error(`Internal server error: ${err.message}`, 500));
@@ -183,37 +197,40 @@ async function getTemplates(req, res) {
     excludeIds
   } = req.query;
   const userId = await getUserId(req);
-  
+
   let query = `
-    SELECT t.*,
+    SELECT e.*,
            u.username,
            COALESCE(fc.favorite_count, 0) as favorite_count,
            ${userId ? `CASE WHEN uf.user_id IS NOT NULL THEN true ELSE false END as user_favorited` : 'false as user_favorited'}
-    FROM templates t
-    LEFT JOIN users u ON t.user_id = u.id
+    FROM entity e
+    LEFT JOIN users u ON e.owner_id = u.id
     LEFT JOIN (
-      SELECT template_id, COUNT(*)::int as favorite_count
-      FROM user_favorites
-      GROUP BY template_id
-    ) fc ON fc.template_id = t.id
-    ${userId ? `LEFT JOIN user_favorites uf ON uf.template_id = t.id AND uf.user_id = $1` : ''}
-    WHERE t.is_public = true
+      SELECT entity_id, COUNT(*)::int as favorite_count
+      FROM favorite
+      GROUP BY entity_id
+    ) fc ON fc.entity_id = e.id
+    ${userId ? `LEFT JOIN favorite uf ON uf.entity_id = e.id AND uf.user_id = $1` : ''}
+    WHERE e.entity_type = 'template'
+      AND e.visibility = 'public'
+      AND e.valid_to IS NULL
+      AND e.deleted_at IS NULL
   `;
-  
+
   const params = [];
   let paramCount = 0;
-  
+
   if (userId) {
     paramCount++;
     params.push(userId);
   }
-  
+
   // Hierarchical category filtering using new helper functions
   const targetCategories = getFilteredCategories({ grandparent, parent, category });
 
   if (targetCategories.length > 0) {
     paramCount++;
-    query += ` AND t.category = ANY($${paramCount})`;
+    query += ` AND e.metadata->>'category' = ANY($${paramCount})`;
     params.push(targetCategories);
   }
 
@@ -227,24 +244,24 @@ async function getTemplates(req, res) {
     }
     if (categoriesList.length > 0) {
       paramCount++;
-      query += ` AND t.category = ANY($${paramCount})`;
+      query += ` AND e.metadata->>'category' = ANY($${paramCount})`;
       params.push(categoriesList);
     }
   }
-  
+
   // Search filtering - enhanced to include tags and creator
   if (search) {
     paramCount++;
     query += ` AND (
-      t.name ILIKE $${paramCount} OR
-      t.description ILIKE $${paramCount} OR
+      e.title ILIKE $${paramCount} OR
+      e.description ILIKE $${paramCount} OR
       u.username ILIKE $${paramCount} OR
-      EXISTS(SELECT 1 FROM unnest(t.tags) as tag WHERE tag ILIKE $${paramCount})
+      EXISTS(SELECT 1 FROM unnest(e.tags) as tag WHERE tag ILIKE $${paramCount})
     )`;
     params.push(`%${search}%`);
   }
-  
-  // Tag filtering - support multiple tags with OR logic (template must have ANY of the selected tags)
+
+  // Tag filtering - support multiple tags with OR logic
   if (tags) {
     let tagsList;
     try {
@@ -254,14 +271,13 @@ async function getTemplates(req, res) {
     }
 
     if (tagsList.length > 0) {
-      // Template must have at least one of the selected tags (OR logic)
       const tagConditions = tagsList.map(tag => {
         paramCount++;
         params.push(`%${tag}%`);
         return `template_tag ILIKE $${paramCount}`;
       }).join(' OR ');
 
-      query += ` AND EXISTS(SELECT 1 FROM unnest(t.tags) as template_tag WHERE ${tagConditions})`;
+      query += ` AND EXISTS(SELECT 1 FROM unnest(e.tags) as template_tag WHERE ${tagConditions})`;
     }
   }
 
@@ -276,7 +292,7 @@ async function getTemplates(req, res) {
 
     if (excludeIdsList.length > 0) {
       paramCount++;
-      query += ` AND t.id != ALL($${paramCount})`;
+      query += ` AND e.id != ALL($${paramCount})`;
       params.push(excludeIdsList);
     }
   }
@@ -285,56 +301,64 @@ async function getTemplates(req, res) {
   let orderClause = 'ORDER BY ';
   switch (sortBy) {
     case 'alphabetical':
-      orderClause += 't.name ASC';
+      orderClause += 'e.title ASC';
       break;
     case 'rating':
-      orderClause += 'favorite_count DESC, t.created_at DESC';
+      orderClause += 'favorite_count DESC, e.created_at DESC';
       break;
     case 'downloads':
     case 'usage':
-      orderClause += 'favorite_count DESC, t.created_at DESC';
+      orderClause += 'favorite_count DESC, e.created_at DESC';
       break;
     case 'recent':
-      orderClause += 't.updated_at DESC';
+      orderClause += 'e.updated_at DESC';
       break;
     case 'relevance':
       if (search) {
         orderClause += `
           (CASE
-            WHEN t.name ILIKE $${params.findIndex(p => p === `%${search}%`) + 1} THEN 1
-            WHEN t.description ILIKE $${params.findIndex(p => p === `%${search}%`) + 1} THEN 2
+            WHEN e.title ILIKE $${params.findIndex(p => p === `%${search}%`) + 1} THEN 1
+            WHEN e.description ILIKE $${params.findIndex(p => p === `%${search}%`) + 1} THEN 2
             ELSE 3
-          END) ASC, favorite_count DESC, t.created_at DESC`;
+          END) ASC, favorite_count DESC, e.created_at DESC`;
       } else {
-        orderClause += 'favorite_count DESC, t.created_at DESC';
+        orderClause += 'favorite_count DESC, e.created_at DESC';
       }
       break;
     default:
-      orderClause += 't.created_at DESC';
+      orderClause += 'e.created_at DESC';
   }
-  
+
   query += ` ${orderClause}`;
-  
+
   paramCount++;
   query += ` LIMIT $${paramCount}`;
   params.push(parseInt(limit));
-  
+
   paramCount++;
   query += ` OFFSET $${paramCount}`;
   params.push(parseInt(offset));
-  
+
   // Get total count for pagination
   let countQuery = `
     SELECT COUNT(*) as total
-    FROM templates t
-    WHERE t.is_public = true
+    FROM entity e
+    WHERE e.entity_type = 'template'
+      AND e.visibility = 'public'
+      AND e.valid_to IS NULL
+      AND e.deleted_at IS NULL
   `;
   const countParams = [];
   let countParamCount = 0;
-  
-  // Apply the same filters to count query (matching the main query logic)
+
+  // Apply the same filters to count query
+  if (targetCategories.length > 0) {
+    countParamCount++;
+    countQuery += ` AND e.metadata->>'category' = ANY($${countParamCount})`;
+    countParams.push(targetCategories);
+  }
+
   if (categories) {
-    // Multiple categories
     let categoriesList;
     try {
       categoriesList = Array.isArray(categories) ? categories : JSON.parse(categories);
@@ -343,92 +367,25 @@ async function getTemplates(req, res) {
     }
     if (categoriesList.length > 0) {
       countParamCount++;
-      countQuery += ` AND t.category = ANY($${countParamCount})`;
+      countQuery += ` AND e.metadata->>'category' = ANY($${countParamCount})`;
       countParams.push(categoriesList);
     }
-  } else if (category) {
-    // Single category
-    countParamCount++;
-    countQuery += ` AND t.category = $${countParamCount}`;
-    countParams.push(category);
-  } else if (parents) {
-    // Multiple parents
-    let parentsList;
-    try {
-      parentsList = Array.isArray(parents) ? parents : JSON.parse(parents);
-    } catch {
-      parentsList = typeof parents === 'string' ? parents.split(',').map(p => p.trim()) : [];
-    }
-    if (parentsList.length > 0) {
-      // Get all categories for all parents
-      const allParentCategories = [];
-      parentsList.forEach(parentId => {
-        const parentCategories = getChildCategoriesForParent(parentId);
-        allParentCategories.push(...parentCategories, parentId);
-      });
-      if (allParentCategories.length > 0) {
-        countParamCount++;
-        countQuery += ` AND t.category = ANY($${countParamCount})`;
-        countParams.push(allParentCategories);
-      }
-    }
-  } else if (parent) {
-    // Single parent
-    const parentCategories = getChildCategoriesForParent(parent);
-    if (parentCategories.length > 0) {
-      countParamCount++;
-      countQuery += ` AND (t.category = ANY($${countParamCount}) OR t.category = $${countParamCount + 1})`;
-      countParams.push(parentCategories);
-      countParamCount++;
-      countParams.push(parent);
-    }
-  } else if (grandparents) {
-    // Multiple grandparents
-    let grandparentsList;
-    try {
-      grandparentsList = Array.isArray(grandparents) ? grandparents : JSON.parse(grandparents);
-    } catch {
-      grandparentsList = typeof grandparents === 'string' ? grandparents.split(',').map(g => g.trim()) : [];
-    }
-    if (grandparentsList.length > 0) {
-      // Get all descendants for all grandparents
-      const allDescendantCategories = [];
-      grandparentsList.forEach(grandparentId => {
-        const descendantCategories = getDescendantCategoriesForGrandparent(grandparentId);
-        allDescendantCategories.push(...descendantCategories, grandparentId);
-      });
-      if (allDescendantCategories.length > 0) {
-        countParamCount++;
-        countQuery += ` AND t.category = ANY($${countParamCount})`;
-        countParams.push(allDescendantCategories);
-      }
-    }
-  } else if (grandparent) {
-    // Single grandparent
-    const descendantCategories = getDescendantCategoriesForGrandparent(grandparent);
-    if (descendantCategories.length > 0) {
-      countParamCount++;
-      countQuery += ` AND (t.category = ANY($${countParamCount}) OR t.category = $${countParamCount + 1})`;
-      countParams.push(descendantCategories);
-      countParamCount++;
-      countParams.push(grandparent);
-    }
   }
-  
+
   if (search) {
     countParamCount++;
     countQuery += ` AND (
-      t.name ILIKE $${countParamCount} OR
-      t.description ILIKE $${countParamCount} OR
+      e.title ILIKE $${countParamCount} OR
+      e.description ILIKE $${countParamCount} OR
       EXISTS(
         SELECT 1 FROM users u
-        WHERE u.id = t.user_id AND u.username ILIKE $${countParamCount}
+        WHERE u.id = e.owner_id AND u.username ILIKE $${countParamCount}
       ) OR
-      EXISTS(SELECT 1 FROM unnest(t.tags) as tag WHERE tag ILIKE $${countParamCount})
+      EXISTS(SELECT 1 FROM unnest(e.tags) as tag WHERE tag ILIKE $${countParamCount})
     )`;
     countParams.push(`%${search}%`);
   }
-  
+
   if (tags) {
     let tagsList;
     try {
@@ -438,18 +395,16 @@ async function getTemplates(req, res) {
     }
 
     if (tagsList.length > 0) {
-      // Template must have at least one of the selected tags (OR logic)
       const tagConditions = tagsList.map(tag => {
         countParamCount++;
         countParams.push(`%${tag}%`);
         return `template_tag ILIKE $${countParamCount}`;
       }).join(' OR ');
 
-      countQuery += ` AND EXISTS(SELECT 1 FROM unnest(t.tags) as template_tag WHERE ${tagConditions})`;
+      countQuery += ` AND EXISTS(SELECT 1 FROM unnest(e.tags) as template_tag WHERE ${tagConditions})`;
     }
   }
 
-  // Apply the same excludeIds filter to count query
   if (excludeIds) {
     let excludeIdsList;
     try {
@@ -460,7 +415,7 @@ async function getTemplates(req, res) {
 
     if (excludeIdsList.length > 0) {
       countParamCount++;
-      countQuery += ` AND t.id != ALL($${countParamCount})`;
+      countQuery += ` AND e.id != ALL($${countParamCount})`;
       countParams.push(excludeIdsList);
     }
   }
@@ -473,34 +428,14 @@ async function getTemplates(req, res) {
   const totalCount = parseInt(countResult.rows[0].total);
 
   console.log(`🔍 [API] Query returned ${result.rows.length} templates, total count: ${totalCount}`);
-  
+
   const templates = result.rows.map(row => {
     const favoriteCount = parseInt(row.favorite_count) || 0;
-    const template = {
-      id: row.id,
-      name: row.name,
-      description: row.description,
-      content: row.content,
-      category: row.category,
-      tags: row.tags,
-      is_public: row.is_public,
-      favorite_count: favoriteCount,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
-      username: row.username,
-      userInteractions: userId ? {
-        isFavorited: row.user_favorited
-      } : null,
-      engagement: {
-        favorites: favoriteCount
-      }
-    };
-
-    // Enrich with hierarchical category structure
+    const template = mapEntityToTemplate(row, favoriteCount, userId ? row.user_favorited : false);
     return enrichWithHierarchy(template);
   });
-  
-  return res.json({ 
+
+  return res.json({
     templates,
     pagination: {
       totalCount,
@@ -517,9 +452,9 @@ async function getTemplates(req, res) {
 // Get user's own templates (both public and private)
 async function getUserTemplates(req, res) {
   const userId = await getUserId(req);
-  
+
   console.log('🔍 DEBUG getUserTemplates - userId:', userId);
-  
+
   if (!userId) {
     console.log('❌ DEBUG getUserTemplates - No userId, authentication failed');
     return res.status(401).json(error('Authentication required', 401));
@@ -527,77 +462,60 @@ async function getUserTemplates(req, res) {
 
   try {
     const { limit = 50, offset = 0 } = req.query;
-    
+
     // Get username for the authenticated user
     const userResult = await db.query('SELECT username FROM users WHERE id = $1', [userId]);
     console.log('🔍 DEBUG getUserTemplates - userResult:', userResult.rows);
-    
+
     if (userResult.rows.length === 0) {
       console.log('❌ DEBUG getUserTemplates - User not found in database');
       return res.status(404).json(error('User not found', 404));
     }
-    
+
     const username = userResult.rows[0].username;
     console.log('🔍 DEBUG getUserTemplates - username:', username);
-    
+
     // Get all templates created by this user (both public and private)
     const query = `
-      SELECT t.*,
+      SELECT e.*,
              u.username,
              COALESCE(uf.favorite_count, 0) as favorite_count,
              false as user_favorited
-      FROM templates t
-      JOIN users u ON t.user_id = u.id
+      FROM entity e
+      JOIN users u ON e.owner_id = u.id
       LEFT JOIN (
-        SELECT template_id, COUNT(*)::int as favorite_count
-        FROM user_favorites
-        GROUP BY template_id
-      ) uf ON uf.template_id = t.id
-      WHERE t.user_id = $1
-      ORDER BY t.created_at DESC
+        SELECT entity_id, COUNT(*)::int as favorite_count
+        FROM favorite
+        GROUP BY entity_id
+      ) uf ON uf.entity_id = e.id
+      WHERE e.owner_id = $1
+        AND e.entity_type = 'template'
+        AND e.valid_to IS NULL
+        AND e.deleted_at IS NULL
+      ORDER BY e.created_at DESC
       LIMIT $2 OFFSET $3
     `;
 
     const result = await db.query(query, [userId, parseInt(limit), parseInt(offset)]);
-    
+
     console.log('🔍 DEBUG getUserTemplates - query result:', {
       rowCount: result.rows.length,
-      templates: result.rows.map(r => ({ id: r.id, name: r.name, username: r.username, is_public: r.is_public }))
+      templates: result.rows.map(r => ({ id: r.id, title: r.title, username: r.username, visibility: r.visibility }))
     });
 
     const templates = result.rows.map(row => {
       const favoriteCount = parseInt(row.favorite_count) || 0;
-      return {
-        id: row.id,
-        name: row.name,
-        description: row.description,
-        content: row.content,
-        category: row.category,
-        tags: row.tags,
-        is_public: row.is_public,
-        favorite_count: favoriteCount,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-        username: row.username,
-        userInteractions: {
-          isFavorited: false // User's own templates, favoriting not applicable
-        },
-        engagement: {
-          favorites: favoriteCount
-        }
-      };
+      const template = mapEntityToTemplate(row, favoriteCount, false);
+      return enrichWithHierarchy(template);
     });
-
-    // Apply hierarchy enrichment
-    const enrichedTemplates = templates.map(template => enrichWithHierarchy(template));
 
     return res.json({
-      templates: enrichedTemplates,
-      total: enrichedTemplates.length,
-      public_count: enrichedTemplates.filter(t => t.is_public).length,
-      private_count: enrichedTemplates.filter(t => !t.is_public).length
+      templates,
+      total: templates.length,
+      public_count: templates.filter(t => t.is_public).length,
+      private_count: templates.filter(t => !t.is_public).length
     });
-    
+
   } catch (err) {
     console.error('Error fetching user templates:', err);
     return res.status(500).json(error('Failed to fetch user templates', 500));
@@ -607,80 +525,79 @@ async function getUserTemplates(req, res) {
 // Get single template by ID
 async function getTemplate(req, res, templateId) {
   const userId = await getUserId(req);
-  
+
   console.log('🔍 DEBUG getTemplate - templateId:', templateId);
   console.log('🔍 DEBUG getTemplate - userId:', userId);
-  
+
   let query, params;
-  
+
   if (userId) {
-    // If user is authenticated, allow access to shared templates OR their own private templates
+    // If user is authenticated, allow access to public templates OR their own private templates
     query = `
-      SELECT t.*,
+      SELECT e.*,
              u.username,
-             (SELECT COUNT(*) FROM user_favorites uf WHERE uf.template_id = t.id) as favorite_count,
-             EXISTS(SELECT 1 FROM user_favorites uf WHERE uf.template_id = t.id AND uf.user_id = $2) as user_favorited
-      FROM templates t
-      LEFT JOIN users u ON t.user_id = u.id
-      WHERE t.id = $1 AND (t.is_public = true OR t.user_id = $2)
+             (SELECT COUNT(*) FROM favorite f WHERE f.entity_id = e.id) as favorite_count,
+             EXISTS(SELECT 1 FROM favorite f WHERE f.entity_id = e.id AND f.user_id = $2) as user_favorited
+      FROM entity e
+      LEFT JOIN users u ON e.owner_id = u.id
+      WHERE e.id = $1
+        AND e.entity_type = 'template'
+        AND (e.visibility = 'public' OR e.owner_id = $2)
+        AND e.valid_to IS NULL
+        AND e.deleted_at IS NULL
     `;
     params = [templateId, userId];
   } else {
-    // If user is not authenticated, only allow shared templates
-    console.log('🔍 DEBUG getTemplate - No userId, using shared-only query');
+    // If user is not authenticated, only allow public templates
+    console.log('🔍 DEBUG getTemplate - No userId, using public-only query');
     query = `
-      SELECT t.*,
+      SELECT e.*,
              u.username,
-             (SELECT COUNT(*) FROM user_favorites uf WHERE uf.template_id = t.id) as favorite_count,
+             (SELECT COUNT(*) FROM favorite f WHERE f.entity_id = e.id) as favorite_count,
              false as user_favorited
-      FROM templates t
-      LEFT JOIN users u ON t.user_id = u.id
-      WHERE t.id = $1 AND t.is_public = true
+      FROM entity e
+      LEFT JOIN users u ON e.owner_id = u.id
+      WHERE e.id = $1
+        AND e.entity_type = 'template'
+        AND e.visibility = 'public'
+        AND e.valid_to IS NULL
+        AND e.deleted_at IS NULL
     `;
     params = [templateId];
   }
-  
+
   console.log('🔍 DEBUG getTemplate - Query:', query);
   console.log('🔍 DEBUG getTemplate - Params:', params);
-  
+
   const result = await db.query(query, params);
-  
+
   console.log('🔍 DEBUG getTemplate - Query result:', {
     rowCount: result.rows.length,
     template: result.rows[0] ? {
       id: result.rows[0].id,
-      name: result.rows[0].name,
+      title: result.rows[0].title,
       username: result.rows[0].username,
-      is_public: result.rows[0].is_public
+      visibility: result.rows[0].visibility
     } : null
   });
-  
+
   if (result.rows.length === 0) {
     console.log('❌ DEBUG getTemplate - Template not found or access denied');
     return res.status(404).json(error('Template not found', 404));
   }
-  
-  const template = result.rows[0];
-  const favoriteCount = parseInt(template.favorite_count) || 0;
 
-  const enrichedTemplate = {
-    ...template,
-    favorite_count: favoriteCount,
-    creator: template.username ? {
-      username: template.username,
-      displayName: template.username,
-      avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(template.username)}&background=6366f1&color=fff`
-    } : null,
-    userInteractions: userId ? {
-      isFavorited: template.user_favorited
-    } : null,
-    engagement: {
-      favorites: favoriteCount
-    }
-  };
-  
-  // FIXED: Use consistent wrapper format like other endpoints
-  const finalTemplate = enrichWithHierarchy(enrichedTemplate);
+  const row = result.rows[0];
+  const favoriteCount = parseInt(row.favorite_count) || 0;
+
+  const template = mapEntityToTemplate(row, favoriteCount, row.user_favorited);
+  template.creator = row.username ? {
+    username: row.username,
+    displayName: row.username,
+    avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(row.username)}&background=6366f1&color=fff`
+  } : null;
+
+  // Use consistent wrapper format like other endpoints
+  const finalTemplate = enrichWithHierarchy(template);
   return res.json({
     template: finalTemplate,
     success: true
@@ -691,20 +608,24 @@ async function getTemplate(req, res, templateId) {
 async function getUserFavorites(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
-  
+
   const { page = 1, limit = 25 } = req.query;
   const offset = (page - 1) * limit;
-  
+
   const query = `
-    SELECT t.*,
+    SELECT e.*,
            u.username,
-           uf.created_at as favorited_at,
-           (SELECT COUNT(*) FROM user_favorites uf2 WHERE uf2.template_id = t.id) as favorite_count
-    FROM user_favorites uf
-    JOIN templates t ON uf.template_id = t.id
-    LEFT JOIN users u ON t.user_id = u.id
-    WHERE uf.user_id = $1 AND t.is_public = true
-    ORDER BY uf.created_at DESC
+           f.created_at as favorited_at,
+           (SELECT COUNT(*) FROM favorite f2 WHERE f2.entity_id = e.id) as favorite_count
+    FROM favorite f
+    JOIN entity e ON f.entity_id = e.id
+    LEFT JOIN users u ON e.owner_id = u.id
+    WHERE f.user_id = $1
+      AND e.entity_type = 'template'
+      AND e.visibility = 'public'
+      AND e.valid_to IS NULL
+      AND e.deleted_at IS NULL
+    ORDER BY f.created_at DESC
     LIMIT $2 OFFSET $3
   `;
 
@@ -712,42 +633,26 @@ async function getUserFavorites(req, res) {
 
   const countQuery = `
     SELECT COUNT(*)
-    FROM user_favorites uf
-    JOIN templates t ON uf.template_id = t.id
-    WHERE uf.user_id = $1 AND t.is_public = true
+    FROM favorite f
+    JOIN entity e ON f.entity_id = e.id
+    WHERE f.user_id = $1
+      AND e.entity_type = 'template'
+      AND e.visibility = 'public'
+      AND e.valid_to IS NULL
+      AND e.deleted_at IS NULL
   `;
   const countResult = await db.query(countQuery, [user.id]);
   const totalCount = parseInt(countResult.rows[0].count);
-  
+
   const favorites = result.rows.map(row => {
     const favoriteCount = parseInt(row.favorite_count) || 0;
-    return {
-      id: row.id,
-      name: row.name,
-      description: row.description,
-      content: row.content,
-      category: row.category,
-      tags: row.tags,
-      is_public: row.is_public,
-      favorite_count: favoriteCount,
-      created_at: row.created_at,
-      favorited_at: row.favorited_at,
-      username: row.username,
-      userInteractions: {
-        isFavorited: true
-      },
-      engagement: {
-        favorites: favoriteCount
-      }
-    };
+    const template = mapEntityToTemplate(row, favoriteCount, true);
+    template.favorited_at = row.favorited_at;
+    return enrichWithHierarchy(template);
   });
 
-  // Apply hierarchy enrichment to favorites
-  const enrichedFavorites = favorites.map(template => enrichWithHierarchy(template));
-
-  // FIXED: Use consistent 'templates' property name like other endpoints
   return res.json({
-    templates: enrichedFavorites,  // Changed from 'favorites' to 'templates'
+    templates: favorites,
     pagination: {
       page: parseInt(page),
       limit: parseInt(limit),
@@ -763,23 +668,28 @@ async function getUserFavorites(req, res) {
 async function toggleFavorite(req, res, templateId) {
   const user = await requireAuth(req, res);
   if (!user) return;
-  
-  console.log('🔄 API - Toggle favorite request:', { 
-    userId: user.id, 
-    templateId, 
-    userEmail: user.email 
+
+  console.log('🔄 API - Toggle favorite request:', {
+    userId: user.id,
+    templateId,
+    userEmail: user.email
   });
-  
-  // Validate UUID format (PostgreSQL UUID format)
+
+  // Validate UUID format
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   if (!uuidRegex.test(templateId)) {
     console.log('❌ API - Invalid template ID format:', templateId);
     return res.status(400).json(error('Invalid template ID format', 400));
   }
-  
-  // Check if template exists and is shared
+
+  // Check if template exists and is public
   const templateResult = await db.query(
-    'SELECT id FROM templates WHERE id = $1 AND is_public = true',
+    `SELECT id FROM entity
+     WHERE id = $1
+       AND entity_type = 'template'
+       AND visibility = 'public'
+       AND valid_to IS NULL
+       AND deleted_at IS NULL`,
     [templateId]
   );
 
@@ -795,7 +705,7 @@ async function toggleFavorite(req, res, templateId) {
 
   // Check if already favorited
   const existingFavorite = await db.query(
-    'SELECT id FROM user_favorites WHERE user_id = $1 AND template_id = $2',
+    'SELECT id FROM favorite WHERE user_id = $1 AND entity_id = $2',
     [user.id, templateId]
   );
 
@@ -806,21 +716,42 @@ async function toggleFavorite(req, res, templateId) {
   });
 
   let isFavorited;
+  const tenantId = await ensureTenant(user.id);
 
   if (existingFavorite.rows.length > 0) {
     // Remove from favorites
     console.log('➖ API - Removing from favorites');
-    await db.query('DELETE FROM user_favorites WHERE user_id = $1 AND template_id = $2', [user.id, templateId]);
+    await db.query('DELETE FROM favorite WHERE user_id = $1 AND entity_id = $2', [user.id, templateId]);
     isFavorited = false;
+
+    // Log event
+    await logEvent({
+      tenantId,
+      eventType: 'template.unfavorited',
+      aggregateType: 'entity',
+      aggregateId: templateId,
+      actorId: user.id,
+      payload: { entityType: 'template' }
+    });
   } else {
     // Add to favorites
     console.log('➕ API - Adding to favorites');
-    await db.query('INSERT INTO user_favorites (user_id, template_id) VALUES ($1, $2)', [user.id, templateId]);
+    await db.query('INSERT INTO favorite (user_id, entity_id) VALUES ($1, $2)', [user.id, templateId]);
     isFavorited = true;
+
+    // Log event
+    await logEvent({
+      tenantId,
+      eventType: 'template.favorited',
+      aggregateType: 'entity',
+      aggregateId: templateId,
+      actorId: user.id,
+      payload: { entityType: 'template' }
+    });
   }
 
   // Get updated favorite count
-  const countResult = await db.query('SELECT COUNT(*) as count FROM user_favorites WHERE template_id = $1', [templateId]);
+  const countResult = await db.query('SELECT COUNT(*) as count FROM favorite WHERE entity_id = $1', [templateId]);
   const favoriteCount = parseInt(countResult.rows[0].count);
 
   return res.json(success({
@@ -861,56 +792,76 @@ async function createTemplate(req, res) {
 
     console.log('🔍 API DEBUG: Normalized tags:', normalizedTags);
 
-    // Name and content are required, description is optional (defaults to empty string in DB)
+    // Name and content are required, description is optional
     if (!name || !content) {
       return res.status(400).json(error('Name and content are required', 400));
     }
 
-    // Ensure category is never null (required by database constraint)
+    // Ensure category defaults to 'general'
     const validCategory = category || 'general';
 
-    // Variables should be JSONB array
+    // Variables should be array
     const normalizedVariables = Array.isArray(variables) ? variables : [];
 
     // Ensure description defaults to empty string if not provided
     const normalizedDescription = description || '';
 
-    const result = await db.query(`
-      INSERT INTO templates (user_id, name, description, content, variables, category, tags, is_public)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      RETURNING *
-    `, [user.id, name, normalizedDescription, content, normalizedVariables, validCategory, normalizedTags, is_public || false]);
-    
-    console.log('🔍 API DEBUG: Raw DB result:', result.rows[0]);
-    console.log('🔍 API DEBUG: User object:', user);
-    
-    // Return the template with consistent structure like other endpoints
-    const baseTemplate = {
-      ...result.rows[0],
-      username: user.username, // Direct username field for consistency
-      // Add user interaction data for consistency
-      userInteractions: {
-        isFavorited: false, // Newly created templates start unfavorited
-        isOwner: true
+    // Ensure tenant
+    const tenantId = await ensureTenant(user.id);
+
+    // Create entity
+    const entity = await createEntity({
+      tenantId,
+      ownerId: user.id,
+      entityType: 'template',
+      title: name,
+      description: normalizedDescription,
+      content: { text: content }, // Store as JSONB
+      tags: normalizedTags,
+      metadata: {
+        category: validCategory,
+        variables: normalizedVariables,
+        is_public: is_public || false
       },
-      // Add engagement data for consistency
-      engagement: {
-        favorites: 0,
-        downloads: 0,
-        ratings: { average: 0, count: 0 }
-      }
+      visibility: (is_public || false) ? 'public' : 'private',
+      status: 'published'
+    });
+
+    // Log event
+    await logEvent({
+      tenantId,
+      eventType: 'entity.created',
+      aggregateType: 'entity',
+      aggregateId: entity.id,
+      actorId: user.id,
+      payload: { entityType: 'template', category: validCategory }
+    });
+
+    console.log('🔍 API DEBUG: Raw entity result:', entity);
+    console.log('🔍 API DEBUG: User object:', user);
+
+    // Return the template with consistent structure
+    const template = mapEntityToTemplate(entity, 0, false);
+    template.username = user.username;
+    template.userInteractions = {
+      isFavorited: false,
+      isOwner: true
     };
-    
-    // Debug logging
-    console.log('🔍 API DEBUG: Base template before enrichment:', baseTemplate);
-    
-    // Enrich with hierarchical category structure (same as other endpoints)
-    const enrichedTemplate = enrichWithHierarchy(baseTemplate);
-    
+    template.engagement = {
+      favorites: 0,
+      downloads: 0,
+      ratings: { average: 0, count: 0 }
+    };
+
+    console.log('🔍 API DEBUG: Mapped template before enrichment:', template);
+
+    // Enrich with hierarchical category structure
+    const enrichedTemplate = enrichWithHierarchy(template);
+
     console.log('🔍 API DEBUG: Enriched template after enrichment:', enrichedTemplate);
-    
+
     return res.status(201).json(success(enrichedTemplate, 'Template created successfully'));
-    
+
   } catch (err) {
     console.error('❌ CREATE_TEMPLATE ERROR:', err);
     return res.status(500).json(error('Failed to create template', 500));
@@ -921,139 +872,143 @@ async function createTemplate(req, res) {
 async function updateTemplate(req, res, templateId) {
   const user = await requireAuth(req, res);
   if (!user) return;
-  
+
   // Validate UUID format
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   if (!uuidRegex.test(templateId)) {
     return res.status(400).json(error('Invalid template ID format', 400));
   }
-  
-  // Check if template exists and user is the creator
-  const existingTemplate = await db.query(
-    'SELECT id, user_id FROM templates WHERE id = $1',
-    [templateId]
-  );
 
-  if (existingTemplate.rows.length === 0) {
+  // Check if template exists and user is the creator
+  const current = await getCurrentEntity(templateId);
+  if (!current || current.owner_id !== user.id || current.entity_type !== 'template') {
     return res.status(404).json(error('Template not found', 404));
   }
 
-  if (existingTemplate.rows[0].user_id !== user.id) {
-    return res.status(403).json(error('You can only update your own templates', 403));
-  }
-  
   const { name, description, content, variables, category, tags, is_public } = req.body;
 
-  // Name and content are required, description is optional (defaults to empty string in DB)
+  // Name and content are required, description is optional
   if (!name || !content) {
     return res.status(400).json(error('Name and content are required', 400));
   }
 
-  // Ensure category is never null (required by database constraint)
+  // Ensure category defaults to 'general'
   const validCategory = category || 'general';
 
-  // Tags should now be simple arrays throughout the system
+  // Tags should now be simple arrays
   const normalizedTags = Array.isArray(tags) ? tags : [];
 
-  // Variables should be JSONB array
+  // Variables should be array
   const normalizedVariables = Array.isArray(variables) ? variables : [];
 
   // Ensure description defaults to empty string if not provided
   const normalizedDescription = description || '';
 
-  const result = await db.query(`
-    UPDATE templates
-    SET name = $2, description = $3, content = $4, variables = $5,
-        category = $6, tags = $7, is_public = $8, updated_at = NOW()
-    WHERE id = $1
-    RETURNING *
-  `, [templateId, name, normalizedDescription, content, normalizedVariables, validCategory, normalizedTags, is_public || false]);
-  
-  return res.json(success(result.rows[0], 'Template updated successfully'));
+  // Build updates object
+  const updates = {
+    title: name,
+    description: normalizedDescription,
+    content: { text: content },
+    tags: normalizedTags,
+    metadata: {
+      ...current.metadata,
+      category: validCategory,
+      variables: normalizedVariables,
+      is_public: is_public || false
+    },
+    visibility: (is_public || false) ? 'public' : 'private'
+  };
+
+  // Update entity (creates new version)
+  const updated = await updateEntity(templateId, updates, user.id);
+
+  // Log event
+  const tenantId = await ensureTenant(user.id);
+  await logEvent({
+    tenantId,
+    eventType: 'entity.updated',
+    aggregateType: 'entity',
+    aggregateId: templateId,
+    actorId: user.id,
+    payload: { entityType: 'template', category: validCategory }
+  });
+
+  // Map to old format
+  const template = mapEntityToTemplate(updated, 0, false);
+
+  return res.json(success(enrichWithHierarchy(template), 'Template updated successfully'));
 }
 
 // Delete template (with cascading cleanup)
 async function deleteTemplate(req, res, templateId) {
   const user = await requireAuth(req, res);
   if (!user) return;
-  
+
   // Validate UUID format
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   if (!uuidRegex.test(templateId)) {
     return res.status(400).json(error('Invalid template ID format', 400));
   }
-  
-  // Check if template exists and user is the creator
-  const existingTemplate = await db.query(
-    'SELECT id, user_id, name FROM templates WHERE id = $1',
-    [templateId]
-  );
 
-  if (existingTemplate.rows.length === 0) {
+  // Check if template exists and user is the creator
+  const current = await getCurrentEntity(templateId);
+  if (!current || current.owner_id !== user.id || current.entity_type !== 'template') {
     return res.status(404).json(error('Template not found', 404));
   }
 
-  if (existingTemplate.rows[0].user_id !== user.id) {
-    return res.status(403).json(error('You can only delete your own templates', 403));
-  }
-  
-  // Delete template (CASCADE will automatically delete related user_favorites)
-  await db.query('DELETE FROM templates WHERE id = $1', [templateId]);
-  
-  return res.json(success({ 
-    id: templateId, 
-    name: existingTemplate.rows[0].name 
+  // Delete entity (soft delete)
+  await deleteEntity(templateId, user.id);
+
+  // Log event
+  const tenantId = await ensureTenant(user.id);
+  await logEvent({
+    tenantId,
+    eventType: 'entity.deleted',
+    aggregateType: 'entity',
+    aggregateId: templateId,
+    actorId: user.id,
+    payload: { entityType: 'template', title: current.title }
+  });
+
+  return res.json(success({
+    id: templateId,
+    name: current.title
   }, 'Template deleted successfully'));
 }
 
-// Helper function to get child categories for a parent
-function getChildCategoriesForParent(parentId) {
-  const childCategories = [];
-  
-  TEMPLATE_CATEGORIES.forEach(grandparent => {
-    grandparent.children.forEach(parent => {
-      if (parent.id === parentId && parent.children) {
-        parent.children.forEach(category => {
-          childCategories.push(category.id);
-        });
-      }
-    });
-  });
-  
-  return childCategories;
-}
+// Helper function to map entity to template format (backward compatibility)
+function mapEntityToTemplate(entity, favoriteCount = 0, userFavorited = false) {
+  const metadata = entity.metadata || {};
+  const content = entity.content || {};
 
-// Helper function to get all descendant categories for a grandparent
-function getDescendantCategoriesForGrandparent(grandparentId) {
-  const descendantCategories = [];
-
-  TEMPLATE_CATEGORIES.forEach(grandparent => {
-    if (grandparent.id === grandparentId) {
-      grandparent.children.forEach(parent => {
-        // Add parent itself
-        descendantCategories.push(parent.id);
-
-        // Add all children of parent
-        if (parent.children) {
-          parent.children.forEach(category => {
-            descendantCategories.push(category.id);
-          });
-        }
-      });
+  return {
+    id: entity.id,
+    name: entity.title,
+    description: entity.description,
+    content: content.text || (typeof entity.content === 'string' ? entity.content : JSON.stringify(entity.content)),
+    category: metadata.category || 'general',
+    tags: entity.tags || [],
+    variables: metadata.variables || [],
+    is_public: metadata.is_public || entity.visibility === 'public',
+    favorite_count: favoriteCount,
+    created_at: entity.created_at,
+    updated_at: entity.updated_at,
+    username: entity.username,
+    userInteractions: {
+      isFavorited: userFavorited
+    },
+    engagement: {
+      favorites: favoriteCount
     }
-  });
-
-  console.log(`🔍 [API] getDescendantCategoriesForGrandparent('${grandparentId}') found ${descendantCategories.length} categories:`, descendantCategories);
-
-  return descendantCategories;
+  };
 }
 
 // Helper function to map flat category to hierarchical structure
 function enrichWithHierarchy(template) {
   if (!template.category) return template;
-  
+
   let hierarchyInfo = null;
-  
+
   // Search through category hierarchy
   TEMPLATE_CATEGORIES.forEach(grandparent => {
     grandparent.children.forEach(parent => {
@@ -1070,7 +1025,7 @@ function enrichWithHierarchy(template) {
       }
     });
   });
-  
+
   return {
     ...template,
     grandparent: hierarchyInfo?.grandparent || '',
@@ -1100,48 +1055,35 @@ async function getTeamTemplates(req, res, teamId) {
 
     // Get templates shared with this team
     const query = `
-      SELECT t.*,
+      SELECT e.*,
              u.username,
              COALESCE(fc.favorite_count, 0) as favorite_count,
-             CASE WHEN uf.user_id IS NOT NULL THEN true ELSE false END as user_favorited
-      FROM templates t
-      LEFT JOIN users u ON t.user_id = u.id
+             CASE WHEN f.user_id IS NOT NULL THEN true ELSE false END as user_favorited
+      FROM entity e
+      LEFT JOIN users u ON e.owner_id = u.id
       LEFT JOIN (
-        SELECT template_id, COUNT(*)::int as favorite_count
-        FROM user_favorites
-        GROUP BY template_id
-      ) fc ON fc.template_id = t.id
-      LEFT JOIN user_favorites uf ON uf.template_id = t.id AND uf.user_id = $1
-      WHERE t.team_id = $2 AND t.visibility = 'team' AND t.deleted_at IS NULL
-      ORDER BY t.updated_at DESC
+        SELECT entity_id, COUNT(*)::int as favorite_count
+        FROM favorite
+        GROUP BY entity_id
+      ) fc ON fc.entity_id = e.id
+      LEFT JOIN favorite f ON f.entity_id = e.id AND f.user_id = $1
+      WHERE e.entity_type = 'template'
+        AND e.metadata->>'team_id' = $2
+        AND e.visibility = 'team'
+        AND e.valid_to IS NULL
+        AND e.deleted_at IS NULL
+      ORDER BY e.updated_at DESC
     `;
 
     const result = await db.query(query, [userId, teamId]);
 
     const templates = result.rows.map(row => {
       const favoriteCount = parseInt(row.favorite_count) || 0;
-      return enrichWithHierarchy({
-        id: row.id,
-        name: row.name,
-        description: row.description,
-        content: row.content,
-        category: row.category,
-        tags: row.tags,
-        is_public: row.is_public,
-        visibility: row.visibility,
-        team_id: row.team_id,
-        favorite_count: favoriteCount,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-        username: row.username,
-        userInteractions: {
-          isFavorited: row.user_favorited,
-          isOwner: row.user_id === userId
-        },
-        engagement: {
-          favorites: favoriteCount
-        }
-      });
+      const template = mapEntityToTemplate(row, favoriteCount, row.user_favorited);
+      template.team_id = teamId;
+      template.visibility = 'team';
+      template.userInteractions.isOwner = row.owner_id === userId;
+      return enrichWithHierarchy(template);
     });
 
     return res.json({
@@ -1168,24 +1110,39 @@ async function shareTemplate(req, res, templateId) {
   }
 
   try {
-    // Use the database function to share
-    const result = await db.query(
-      'SELECT share_template_with_team($1, $2, $3) as success',
-      [templateId, team_id, user.id]
-    );
-
-    if (result.rows[0].success) {
-      // Get updated template
-      const templateResult = await db.query(
-        'SELECT * FROM templates WHERE id = $1',
-        [templateId]
-      );
-
-      return res.json(success(
-        enrichWithHierarchy(templateResult.rows[0]),
-        'Template shared with team successfully'
-      ));
+    // Verify ownership
+    const current = await getCurrentEntity(templateId);
+    if (!current || current.owner_id !== user.id || current.entity_type !== 'template') {
+      return res.status(404).json(error('Template not found', 404));
     }
+
+    // Update entity to add team_id to metadata and set visibility
+    const updates = {
+      metadata: {
+        ...current.metadata,
+        team_id
+      },
+      visibility: 'team'
+    };
+
+    const updated = await updateEntity(templateId, updates, user.id);
+
+    // Log event
+    const tenantId = await ensureTenant(user.id);
+    await logEvent({
+      tenantId,
+      eventType: 'template.shared',
+      aggregateType: 'entity',
+      aggregateId: templateId,
+      actorId: user.id,
+      payload: { entityType: 'template', team_id }
+    });
+
+    const template = mapEntityToTemplate(updated, 0, false);
+    return res.json(success(
+      enrichWithHierarchy(template),
+      'Template shared with team successfully'
+    ));
 
   } catch (err) {
     console.error('Error sharing template:', err);
@@ -1199,24 +1156,39 @@ async function unshareTemplate(req, res, templateId) {
   if (!user) return;
 
   try {
-    // Use the database function to unshare
-    const result = await db.query(
-      'SELECT unshare_template($1, $2) as success',
-      [templateId, user.id]
-    );
-
-    if (result.rows[0].success) {
-      // Get updated template
-      const templateResult = await db.query(
-        'SELECT * FROM templates WHERE id = $1',
-        [templateId]
-      );
-
-      return res.json(success(
-        enrichWithHierarchy(templateResult.rows[0]),
-        'Template is now private'
-      ));
+    // Verify ownership
+    const current = await getCurrentEntity(templateId);
+    if (!current || current.owner_id !== user.id || current.entity_type !== 'template') {
+      return res.status(404).json(error('Template not found', 404));
     }
+
+    // Update entity to remove team_id and set visibility to private
+    const metadata = { ...current.metadata };
+    delete metadata.team_id;
+
+    const updates = {
+      metadata,
+      visibility: 'private'
+    };
+
+    const updated = await updateEntity(templateId, updates, user.id);
+
+    // Log event
+    const tenantId = await ensureTenant(user.id);
+    await logEvent({
+      tenantId,
+      eventType: 'template.unshared',
+      aggregateType: 'entity',
+      aggregateId: templateId,
+      actorId: user.id,
+      payload: { entityType: 'template' }
+    });
+
+    const template = mapEntityToTemplate(updated, 0, false);
+    return res.json(success(
+      enrichWithHierarchy(template),
+      'Template is now private'
+    ));
 
   } catch (err) {
     console.error('Error unsharing template:', err);
@@ -1230,15 +1202,22 @@ async function getTemplateVersions(req, res, templateId) {
   if (!user) return;
 
   try {
-    const result = await db.query(
-      'SELECT * FROM get_template_version_history($1, $2)',
-      [templateId, 50] // Get last 50 versions
+    // Verify access
+    const current = await getCurrentEntity(templateId);
+    if (!current || current.entity_type !== 'template') {
+      return res.status(404).json(error('Template not found', 404));
+    }
+
+    // Get version history using temporal query
+    const versions = await db.query(
+      'SELECT * FROM get_entity_history($1) ORDER BY version DESC LIMIT 50',
+      [templateId]
     );
 
     return res.json(success({
       template_id: templateId,
-      versions: result.rows,
-      total: result.rows.length
+      versions: versions.rows,
+      total: versions.rows.length
     }));
   } catch (err) {
     console.error('Error fetching template versions:', err);
@@ -1252,16 +1231,19 @@ async function getTemplateVersion(req, res, templateId, versionId) {
   if (!user) return;
 
   try {
+    // Get specific version
     const result = await db.query(
-      'SELECT * FROM template_versions WHERE id = $1 AND template_id = $2',
-      [versionId, templateId]
+      `SELECT * FROM entity
+       WHERE id = $1 AND version = $2`,
+      [templateId, parseInt(versionId)]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json(error('Version not found', 404));
     }
 
-    return res.json(success({ version: result.rows[0] }));
+    const template = mapEntityToTemplate(result.rows[0], 0, false);
+    return res.json(success({ version: template }));
   } catch (err) {
     console.error('Error fetching template version:', err);
     return res.status(500).json(error('Failed to fetch version', 500));
@@ -1274,17 +1256,52 @@ async function revertTemplateVersion(req, res, templateId, versionId) {
   if (!user) return;
 
   try {
-    const result = await db.query(
-      'SELECT revert_template_to_version($1, $2, $3) as success',
-      [templateId, versionId, user.id]
+    // Verify ownership
+    const current = await getCurrentEntity(templateId);
+    if (!current || current.owner_id !== user.id || current.entity_type !== 'template') {
+      return res.status(404).json(error('Template not found', 404));
+    }
+
+    // Get the version to revert to
+    const versionResult = await db.query(
+      `SELECT * FROM entity WHERE id = $1 AND version = $2`,
+      [templateId, parseInt(versionId)]
     );
 
-    if (result.rows[0].success) {
-      return res.json(success({
-        message: 'Template reverted successfully',
-        template_id: templateId
-      }));
+    if (versionResult.rows.length === 0) {
+      return res.status(404).json(error('Version not found', 404));
     }
+
+    const oldVersion = versionResult.rows[0];
+
+    // Create a new version with the old content
+    const updates = {
+      title: oldVersion.title,
+      description: oldVersion.description,
+      content: oldVersion.content,
+      tags: oldVersion.tags,
+      metadata: oldVersion.metadata,
+      visibility: oldVersion.visibility
+    };
+
+    const updated = await updateEntity(templateId, updates, user.id);
+
+    // Log event
+    const tenantId = await ensureTenant(user.id);
+    await logEvent({
+      tenantId,
+      eventType: 'template.reverted',
+      aggregateType: 'entity',
+      aggregateId: templateId,
+      actorId: user.id,
+      payload: { entityType: 'template', revertedToVersion: versionId }
+    });
+
+    return res.json(success({
+      message: 'Template reverted successfully',
+      template_id: templateId,
+      reverted_to_version: versionId
+    }));
   } catch (err) {
     console.error('Error reverting template:', err);
     return res.status(500).json(error(err.message || 'Failed to revert template', 500));
@@ -1299,14 +1316,34 @@ async function createManualTemplateVersion(req, res, templateId) {
   const { change_summary } = req.body;
 
   try {
-    const versionId = await db.query(
-      'SELECT create_template_version($1, $2, $3) as version_id',
-      [templateId, user.id, change_summary || 'Manual snapshot']
-    );
+    // Verify ownership
+    const current = await getCurrentEntity(templateId);
+    if (!current || current.owner_id !== user.id || current.entity_type !== 'template') {
+      return res.status(404).json(error('Template not found', 404));
+    }
+
+    // Create a new version by updating with same content (triggers version creation)
+    const updated = await updateEntity(templateId, {
+      metadata: {
+        ...current.metadata,
+        change_summary: change_summary || 'Manual snapshot'
+      }
+    }, user.id);
+
+    // Log event
+    const tenantId = await ensureTenant(user.id);
+    await logEvent({
+      tenantId,
+      eventType: 'template.version_created',
+      aggregateType: 'entity',
+      aggregateId: templateId,
+      actorId: user.id,
+      payload: { entityType: 'template', change_summary }
+    });
 
     return res.json(success({
       message: 'Version created successfully',
-      version_id: versionId.rows[0].version_id
+      version_id: updated.version
     }));
   } catch (err) {
     console.error('Error creating template version:', err);
@@ -1320,8 +1357,21 @@ async function getTemplateDependencies(req, res, templateId) {
   if (!user) return;
 
   try {
+    // Verify access
+    const current = await getCurrentEntity(templateId);
+    if (!current || current.entity_type !== 'template') {
+      return res.status(404).json(error('Template not found', 404));
+    }
+
+    // Get dependencies from relationship table
     const result = await db.query(
-      'SELECT * FROM get_template_dependencies($1)',
+      `SELECT r.*, e.title as dependency_name, e.entity_type as dependency_type
+       FROM relationship r
+       JOIN entity e ON r.target_id = e.id
+       WHERE r.source_id = $1
+         AND r.relationship_type = 'depends_on'
+         AND e.valid_to IS NULL
+         AND e.deleted_at IS NULL`,
       [templateId]
     );
 
@@ -1341,9 +1391,22 @@ async function getTemplateDependents(req, res, templateId) {
   if (!user) return;
 
   try {
+    // Verify access
+    const current = await getCurrentEntity(templateId);
+    if (!current || current.entity_type !== 'template') {
+      return res.status(404).json(error('Template not found', 404));
+    }
+
+    // Get dependents from relationship table
     const result = await db.query(
-      'SELECT * FROM get_resource_dependents($1, $2)',
-      ['template', templateId]
+      `SELECT r.*, e.title as dependent_name, e.entity_type as dependent_type
+       FROM relationship r
+       JOIN entity e ON r.source_id = e.id
+       WHERE r.target_id = $1
+         AND r.relationship_type = 'depends_on'
+         AND e.valid_to IS NULL
+         AND e.deleted_at IS NULL`,
+      [templateId]
     );
 
     return res.json(success({
@@ -1362,9 +1425,25 @@ async function getSuggestedContexts(req, res, templateId) {
   if (!user) return;
 
   try {
+    // Verify access
+    const current = await getCurrentEntity(templateId);
+    if (!current || current.entity_type !== 'template') {
+      return res.status(404).json(error('Template not found', 404));
+    }
+
+    // Get suggested contexts based on relationships
     const result = await db.query(
-      'SELECT * FROM get_suggested_contexts($1, $2, $3)',
-      [templateId, user.id, 10]
+      `SELECT DISTINCT e.id, e.title, e.description, e.entity_type,
+              COUNT(*) OVER (PARTITION BY e.id) as usage_count
+       FROM relationship r
+       JOIN entity e ON r.target_id = e.id
+       WHERE r.source_id = $1
+         AND e.entity_type = 'context'
+         AND e.valid_to IS NULL
+         AND e.deleted_at IS NULL
+       ORDER BY usage_count DESC
+       LIMIT 10`,
+      [templateId]
     );
 
     return res.json(success({
@@ -1389,10 +1468,41 @@ async function trackTemplateUsage(req, res, templateId) {
   }
 
   try {
-    await db.query(
-      'SELECT track_usage_relationship($1, $2, $3)',
-      [templateId, layer_id, user.id]
-    );
+    // Verify template access
+    const current = await getCurrentEntity(templateId);
+    if (!current || current.entity_type !== 'template') {
+      return res.status(404).json(error('Template not found', 404));
+    }
+
+    const tenantId = await ensureTenant(user.id);
+
+    // Track usage
+    await trackUsage({
+      tenantId,
+      userId: user.id,
+      entityId: templateId,
+      eventType: 'entity.used'
+    });
+
+    // Create relationship if layer_id provided
+    if (layer_id) {
+      await db.query(
+        `INSERT INTO relationship (source_id, target_id, relationship_type, created_by)
+         VALUES ($1, $2, 'uses', $3)
+         ON CONFLICT DO NOTHING`,
+        [templateId, layer_id, user.id]
+      );
+    }
+
+    // Log event
+    await logEvent({
+      tenantId,
+      eventType: 'template.used',
+      aggregateType: 'entity',
+      aggregateId: templateId,
+      actorId: user.id,
+      payload: { entityType: 'template', layer_id }
+    });
 
     return res.json(success({
       message: 'Usage tracked successfully'
@@ -1412,39 +1522,47 @@ async function cloneTemplate(req, res, templateId) {
 
   try {
     // Get original template
-    const templateResult = await db.query(
-      'SELECT * FROM templates WHERE id = $1',
-      [templateId]
-    );
+    const original = await getCurrentEntity(templateId);
 
-    if (templateResult.rows.length === 0) {
+    if (!original || original.entity_type !== 'template') {
       return res.status(404).json(error('Template not found', 404));
     }
 
-    const originalTemplate = templateResult.rows[0];
-
     // Create clone with new name
-    const cloneName = customName || `${originalTemplate.name} (Copy)`;
+    const cloneName = customName || `${original.title} (Copy)`;
 
-    const insertResult = await db.query(
-      `INSERT INTO templates (
-        user_id, name, content, description, category,
-        is_public, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, false, NOW(), NOW())
-      RETURNING *`,
-      [
-        user.id,
-        cloneName,
-        originalTemplate.content,
-        originalTemplate.description,
-        originalTemplate.category
-      ]
-    );
+    const tenantId = await ensureTenant(user.id);
 
-    const clonedTemplate = insertResult.rows[0];
+    const cloned = await createEntity({
+      tenantId,
+      ownerId: user.id,
+      entityType: 'template',
+      title: cloneName,
+      description: original.description,
+      content: original.content,
+      tags: original.tags,
+      metadata: {
+        ...original.metadata,
+        cloned_from: templateId
+      },
+      visibility: 'private',
+      status: 'published'
+    });
+
+    // Log event
+    await logEvent({
+      tenantId,
+      eventType: 'template.cloned',
+      aggregateType: 'entity',
+      aggregateId: cloned.id,
+      actorId: user.id,
+      payload: { entityType: 'template', cloned_from: templateId }
+    });
+
+    const template = mapEntityToTemplate(cloned, 0, false);
 
     return res.status(201).json(success({
-      template: clonedTemplate,
+      template: enrichWithHierarchy(template),
       message: 'Template cloned successfully'
     }));
 
@@ -1471,26 +1589,25 @@ async function renderTemplate(req, res, templateId) {
     }
 
     // Get template
-    const templateResult = await db.query(
-      `SELECT * FROM templates WHERE id = $1`,
-      [templateId]
-    );
+    const template = await getCurrentEntity(templateId);
 
-    if (templateResult.rows.length === 0) {
+    if (!template || template.entity_type !== 'template') {
       return res.status(404).json(error('Template not found', 404));
     }
 
-    const template = templateResult.rows[0];
-
     // Check access permissions
-    if (!template.is_public && template.user_id !== userId) {
-      // Check if user has team access
-      if (template.team_id) {
+    if (template.visibility === 'private' && template.owner_id !== userId) {
+      return res.status(403).json(error('Access denied', 403));
+    }
+
+    if (template.visibility === 'team') {
+      const teamId = template.metadata?.team_id;
+      if (teamId && userId) {
         const teamAccessResult = await db.query(
-          `SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2`,
-          [template.team_id, userId]
+          `SELECT user_has_team_access($1, $2) as has_access`,
+          [userId, teamId]
         );
-        if (teamAccessResult.rows.length === 0) {
+        if (!teamAccessResult.rows[0]?.has_access) {
           return res.status(403).json(error('Access denied', 403));
         }
       } else {
@@ -1498,8 +1615,11 @@ async function renderTemplate(req, res, templateId) {
       }
     }
 
+    // Extract content
+    const content = template.content?.text || (typeof template.content === 'string' ? template.content : JSON.stringify(template.content));
+
     // Extract variables from template content
-    const templateVars = extractTemplateVariables(template.content);
+    const templateVars = extractTemplateVariables(content);
 
     // Check for required variables
     const missingVars = [];
@@ -1518,7 +1638,7 @@ async function renderTemplate(req, res, templateId) {
     }
 
     // Substitute variables in template content
-    let rendered = template.content;
+    let rendered = content;
 
     for (const [varName, varValue] of Object.entries(variables)) {
       // Support multiple variable formats:
@@ -1538,12 +1658,22 @@ async function renderTemplate(req, res, templateId) {
 
     // Track template usage
     if (userId) {
-      await db.query(
-        `INSERT INTO template_usage (template_id, user_id, used_at)
-         VALUES ($1, $2, NOW())
-         ON CONFLICT DO NOTHING`,
-        [templateId, userId]
-      ).catch(() => {}); // Ignore if table doesn't exist
+      const tenantId = await ensureTenant(userId);
+      await trackUsage({
+        tenantId,
+        userId,
+        entityId: templateId,
+        eventType: 'entity.used'
+      });
+
+      await logEvent({
+        tenantId,
+        eventType: 'template.rendered',
+        aggregateType: 'entity',
+        aggregateId: templateId,
+        actorId: userId,
+        payload: { entityType: 'template', variables: Object.keys(variables) }
+      });
     }
 
     // Calculate token count (rough estimate: 4 chars ≈ 1 token)
@@ -1552,9 +1682,9 @@ async function renderTemplate(req, res, templateId) {
     return res.json(success({
       rendered,
       template_id: templateId,
-      template_name: template.name,
+      template_name: template.title,
       metadata: {
-        original_length: template.content.length,
+        original_length: content.length,
         rendered_length: rendered.length,
         estimated_tokens: estimatedTokens,
         variables_used: Object.keys(variables),
@@ -1614,14 +1744,14 @@ async function getTableSchema(req, res) {
     const query = `
       SELECT column_name, data_type, character_maximum_length, column_default, is_nullable
       FROM information_schema.columns
-      WHERE table_name = 'templates'
+      WHERE table_name = 'entity'
       ORDER BY ordinal_position;
     `;
 
     const result = await db.query(query);
 
     return res.json({
-      table: 'templates',
+      table: 'entity',
       columns: result.rows
     });
 

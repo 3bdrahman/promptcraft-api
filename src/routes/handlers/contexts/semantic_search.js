@@ -1,25 +1,18 @@
 /**
- * Semantic Search Handler for Contexts
- *
- * Provides semantic similarity search across user's context layers
+ * Semantic Search Handler for Contexts - Updated for Enterprise Schema
+ * Uses unified embedding table with pgvector
  *
  * @module handlers/contexts/semantic_search
  */
 
-import { db } from '../../utils/database.js';
-import { getUserId } from '../../utils/auth.js';
-import { success, error } from '../../utils/responses.js';
-import { generateEmbedding } from '../../services/localEmbeddingService.js';
+import { db, ensureTenant } from '../../../utils/database.js';
+import { getUserId } from '../../../utils/auth.js';
+import { success, error } from '../../../utils/responses.js';
+import { generateEmbedding } from '../../../services/localEmbeddingService.js';
 
 /**
  * POST /api/contexts/search
- * Semantic search for contexts
- *
- * Body:
- * - query_text: Search query
- * - limit: Maximum results (default 10)
- * - min_similarity: Minimum similarity threshold (default 0.7)
- * - exclude_ids: Array of context IDs to exclude
+ * Semantic search for contexts using vector similarity
  */
 export async function semanticSearchContexts(req, res) {
   try {
@@ -27,6 +20,8 @@ export async function semanticSearchContexts(req, res) {
     if (!userId) {
       return res.status(401).json(error('Unauthorized', 401));
     }
+
+    const tenantId = await ensureTenant(userId);
 
     const {
       query_text,
@@ -44,54 +39,82 @@ export async function semanticSearchContexts(req, res) {
     const { embedding } = await generateEmbedding(query_text);
     const embeddingTime = Date.now() - startTime;
 
-    // Search contexts using vector similarity
+    // Convert embedding to pgvector format
+    const vectorString = `[${embedding.join(',')}]`;
+
+    // Search contexts using the enterprise schema search function
     const searchResults = await db.query(
-      `SELECT
-         cl.id as context_id,
-         cl.name as context_name,
-         cl.layer_type,
-         cl.description,
-         cl.priority,
-         cl.token_count,
-         SUBSTRING(cl.content, 1, 200) as content_preview,
-         1 - (ce.embedding <=> $1::vector(384)) as similarity
-       FROM context_layers cl
-       INNER JOIN context_embeddings ce ON ce.context_id = cl.id
-       WHERE cl.user_id = $2
-         AND cl.is_active = true
-         AND (1 - (ce.embedding <=> $1::vector(384))) >= $3
-         AND cl.id != ALL($4::UUID[])
-       ORDER BY similarity DESC
-       LIMIT $5`,
+      `SELECT * FROM search_similar_entities(
+        $1::UUID,
+        $2::vector(1536),
+        'context',
+        $3::INTEGER
+      ) WHERE similarity >= $4
+        AND entity_id != ALL($5::UUID[])`,
       [
-        `[${embedding.join(',')}]`,
-        userId,
+        tenantId,
+        vectorString,
+        limit * 2, // Get more results to filter
         min_similarity,
-        exclude_ids.length > 0 ? exclude_ids : ['00000000-0000-0000-0000-000000000000'],
-        limit
+        exclude_ids.length > 0 ? exclude_ids : ['00000000-0000-0000-0000-000000000000']
       ]
     );
 
-    const results = {
-      query: query_text,
-      contexts: searchResults.rows.map(row => ({
-        context_id: row.context_id,
-        context_name: row.context_name,
-        layer_type: row.layer_type,
-        description: row.description,
-        priority: row.priority,
-        token_count: row.token_count,
-        content_preview: row.content_preview,
-        similarity: parseFloat(row.similarity)
-      })),
-      total_results: searchResults.rows.length,
-      embedding_time_ms: embeddingTime,
-      total_time_ms: Date.now() - startTime
-    };
+    // Get full entity details for results
+    const entityIds = searchResults.rows.map(r => r.entity_id);
+    if (entityIds.length === 0) {
+      return res.json(success({
+        query: query_text,
+        contexts: [],
+        count: 0,
+        timing: { embedding_ms: embeddingTime }
+      }));
+    }
 
-    return res.json(success(results));
+    const entities = await db.query(
+      `SELECT e.id, e.title as name, e.description,
+              e.metadata->>'layer_type' as layer_type,
+              e.content, e.tags, e.created_at, e.updated_at
+       FROM entity e
+       WHERE e.id = ANY($1::UUID[])
+         AND e.entity_type = 'context'
+         AND e.valid_to IS NULL
+         AND e.deleted_at IS NULL
+       LIMIT $2`,
+      [entityIds, limit]
+    );
+
+    // Merge similarity scores with entity data
+    const resultsMap = new Map(searchResults.rows.map(r => [r.entity_id, r.similarity]));
+    const contexts = entities.rows.map(row => ({
+      context_id: row.id,
+      context_name: row.name,
+      layer_type: row.layer_type || 'adhoc',
+      description: row.description,
+      content_preview: typeof row.content === 'string'
+        ? row.content.substring(0, 200)
+        : JSON.stringify(row.content).substring(0, 200),
+      tags: row.tags,
+      similarity: resultsMap.get(row.id) || 0,
+      created_at: row.created_at,
+      updated_at: row.updated_at
+    }));
+
+    // Sort by similarity
+    contexts.sort((a, b) => b.similarity - a.similarity);
+
+    return res.json(success({
+      query: query_text,
+      contexts,
+      count: contexts.length,
+      timing: {
+        embedding_ms: embeddingTime,
+        total_ms: Date.now() - startTime
+      }
+    }));
+
   } catch (err) {
-    console.error('Semantic search error:', err);
+    console.error('Context semantic search error:', err);
     return res.status(500).json(error(err.message, 500));
   }
 }
@@ -99,76 +122,101 @@ export async function semanticSearchContexts(req, res) {
 /**
  * GET /api/contexts/layers/:id/similar
  * Find contexts similar to a specific context
- *
- * Query params:
- * - limit: Maximum results (default 10)
- * - min_similarity: Minimum similarity threshold (default 0.7)
  */
-export async function findSimilarContexts(req, res) {
+export async function findSimilarContexts(req, res, contextId) {
   try {
     const userId = await getUserId(req);
     if (!userId) {
       return res.status(401).json(error('Unauthorized', 401));
     }
 
-    const { id } = req.params;
-    const { limit = 10, min_similarity = 0.7 } = req.query;
+    const tenantId = await ensureTenant(userId);
 
-    // Get the source context's embedding
-    const sourceContext = await db.query(
-      `SELECT ce.embedding, cl.name
-       FROM context_embeddings ce
-       INNER JOIN context_layers cl ON cl.id = ce.context_id
-       WHERE ce.context_id = $1 AND cl.user_id = $2`,
-      [id, userId]
+    const {
+      limit = 10,
+      min_similarity = 0.7
+    } = req.query;
+
+    // Verify context exists and get its embedding
+    const embeddingResult = await db.query(
+      `SELECT emb.vector, e.title
+       FROM embedding emb
+       JOIN entity e ON emb.entity_id = e.id
+       WHERE emb.entity_id = $1
+         AND e.owner_id = $2
+         AND e.entity_type = 'context'
+         AND e.valid_to IS NULL
+         AND e.deleted_at IS NULL
+         AND emb.status = 'completed'
+       LIMIT 1`,
+      [contextId, userId]
     );
 
-    if (sourceContext.rows.length === 0) {
-      return res.status(404).json(error('Context not found', 404));
+    if (embeddingResult.rows.length === 0) {
+      return res.status(404).json(error('Context not found or embedding not generated', 404));
     }
 
-    const sourceEmbedding = sourceContext.rows[0].embedding;
-    const sourceName = sourceContext.rows[0].name;
+    const queryVector = embeddingResult.rows[0].vector;
+    const contextName = embeddingResult.rows[0].title;
 
     // Find similar contexts
     const similarResults = await db.query(
-      `SELECT
-         cl.id as context_id,
-         cl.name as context_name,
-         cl.layer_type,
-         cl.description,
-         cl.priority,
-         cl.token_count,
-         SUBSTRING(cl.content, 1, 200) as content_preview,
-         1 - (ce.embedding <=> $1) as similarity
-       FROM context_layers cl
-       INNER JOIN context_embeddings ce ON ce.context_id = cl.id
-       WHERE cl.user_id = $2
-         AND cl.is_active = true
-         AND cl.id != $3
-         AND (1 - (ce.embedding <=> $1)) >= $4
-       ORDER BY similarity DESC
-       LIMIT $5`,
-      [sourceEmbedding, userId, id, parseFloat(min_similarity), parseInt(limit)]
+      `SELECT * FROM search_similar_entities(
+        $1::UUID,
+        $2::vector(1536),
+        'context',
+        $3::INTEGER
+      ) WHERE similarity >= $4
+        AND entity_id != $5`,
+      [tenantId, queryVector, limit + 1, min_similarity, contextId]
     );
 
-    const results = {
-      source_context_id: id,
-      source_context_name: sourceName,
-      similar_contexts: similarResults.rows.map(row => ({
-        context_id: row.context_id,
-        context_name: row.context_name,
-        layer_type: row.layer_type,
-        description: row.description,
-        priority: row.priority,
-        token_count: row.token_count,
-        content_preview: row.content_preview,
-        similarity: parseFloat(row.similarity)
-      })),
-      total_results: similarResults.rows.length
-    };
+    // Get full entity details
+    const entityIds = similarResults.rows
+      .filter(r => r.entity_id !== contextId)
+      .map(r => r.entity_id)
+      .slice(0, limit);
 
-    return res.json(success(results));
+    if (entityIds.length === 0) {
+      return res.json(success({
+        context_id: contextId,
+        context_name: contextName,
+        similar_contexts: []
+      }));
+    }
+
+    const entities = await db.query(
+      `SELECT e.id, e.title as name, e.description,
+              e.metadata->>'layer_type' as layer_type,
+              e.tags, e.created_at
+       FROM entity e
+       WHERE e.id = ANY($1::UUID[])
+         AND e.entity_type = 'context'
+         AND e.valid_to IS NULL
+         AND e.deleted_at IS NULL`,
+      [entityIds]
+    );
+
+    // Merge with similarity scores
+    const resultsMap = new Map(similarResults.rows.map(r => [r.entity_id, r.similarity]));
+    const similarContexts = entities.rows.map(row => ({
+      context_id: row.id,
+      context_name: row.name,
+      layer_type: row.layer_type || 'adhoc',
+      description: row.description,
+      tags: row.tags,
+      similarity: resultsMap.get(row.id) || 0,
+      created_at: row.created_at
+    }));
+
+    similarContexts.sort((a, b) => b.similarity - a.similarity);
+
+    return res.json(success({
+      context_id: contextId,
+      context_name: contextName,
+      similar_contexts: similarContexts
+    }));
+
   } catch (err) {
     console.error('Find similar contexts error:', err);
     return res.status(500).json(error(err.message, 500));

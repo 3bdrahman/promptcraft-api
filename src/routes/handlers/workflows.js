@@ -1,6 +1,7 @@
 /**
- * Workflows API Handler
- * Handles workflow CRUD operations and execution
+ * Workflows API Handler - Updated for Enterprise Schema
+ * Uses universal entity table with entity_type = 'workflow'
+ * Supports temporal versioning and event sourcing
  *
  * Endpoints:
  * - POST   /api/workflows              - Create new workflow
@@ -14,11 +15,18 @@
  */
 
 import { Router } from 'express';
-import { db } from '../../utils/database.js';
+import {
+  db,
+  ensureTenant,
+  createEntity,
+  updateEntity,
+  deleteEntity,
+  getCurrentEntity,
+  trackUsage,
+  logEvent
+} from '../../utils/database.js';
 import { success, error } from '../../utils/responses.js';
 import axios from 'axios';
-
-const { query } = db;
 
 const router = Router();
 
@@ -70,8 +78,10 @@ function validateWorkflowConfig(config) {
  * Check if user has access to workflow
  */
 async function checkWorkflowAccess(workflowId, userId) {
-  const result = await query(
-    `SELECT id, user_id, is_public FROM workflows WHERE id = $1`,
+  const result = await db.query(
+    `SELECT id, owner_id, visibility FROM entity
+     WHERE id = $1 AND entity_type = 'workflow'
+       AND valid_to IS NULL AND deleted_at IS NULL`,
     [workflowId]
   );
 
@@ -82,12 +92,12 @@ async function checkWorkflowAccess(workflowId, userId) {
   const workflow = result.rows[0];
 
   // User owns the workflow
-  if (workflow.user_id === userId) {
+  if (workflow.owner_id === userId) {
     return { hasAccess: true, workflow, reason: 'owner' };
   }
 
   // Workflow is public (read-only access)
-  if (workflow.is_public) {
+  if (workflow.visibility === 'public') {
     return { hasAccess: true, workflow, reason: 'public', readOnly: true };
   }
 
@@ -101,10 +111,11 @@ async function checkWorkflowAccess(workflowId, userId) {
 async function renderTemplate(templateId, variables, userId) {
   try {
     // Get template
-    const templateResult = await query(
-      `SELECT id, name, content, variables as template_variables, user_id, visibility
-       FROM templates
-       WHERE id = $1`,
+    const templateResult = await db.query(
+      `SELECT id, title, content, metadata, owner_id, visibility
+       FROM entity
+       WHERE id = $1 AND entity_type = 'template'
+         AND valid_to IS NULL AND deleted_at IS NULL`,
       [templateId]
     );
 
@@ -117,20 +128,23 @@ async function renderTemplate(templateId, variables, userId) {
     // Check access
     if (
       template.visibility === 'private' &&
-      template.user_id !== userId
+      template.owner_id !== userId
     ) {
       throw new Error(`No access to template ${templateId}`);
     }
 
+    // Extract content (stored as JSONB)
+    const content = template.content?.text || (typeof template.content === 'string' ? template.content : JSON.stringify(template.content));
+
     // Perform variable substitution
-    let rendered = template.content;
+    let rendered = content;
     const variablesUsed = [];
 
     // Replace {{variable}} patterns
     const variableRegex = /\{\{([^}]+)\}\}/g;
     let match;
 
-    while ((match = variableRegex.exec(template.content)) !== null) {
+    while ((match = variableRegex.exec(content)) !== null) {
       const fullMatch = match[0]; // {{varName}}
       const varDef = match[1].trim(); // varName or varName:type or varName:type:description
       const varParts = varDef.split(':');
@@ -146,7 +160,7 @@ async function renderTemplate(templateId, variables, userId) {
     return {
       rendered,
       templateId: template.id,
-      templateName: template.name,
+      templateName: template.title,
       variablesUsed: [...new Set(variablesUsed)],
     };
   } catch (err) {
@@ -350,25 +364,39 @@ router.post('/', async (req, res) => {
       return res.status(400).json(error(`Invalid workflow config: ${validation.error}`));
     }
 
-    // Insert workflow
-    const result = await query(
-      `INSERT INTO workflows (
-        user_id, name, description, config, status, is_public, category, tags
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      RETURNING *`,
-      [
-        userId,
-        name.trim(),
-        description || null,
-        JSON.stringify(config),
-        status || 'draft',
-        is_public || false,
-        category || 'general',
-        tags || [],
-      ]
-    );
+    // Ensure tenant
+    const tenantId = await ensureTenant(userId);
 
-    const workflow = result.rows[0];
+    // Create entity
+    const entity = await createEntity({
+      tenantId,
+      ownerId: userId,
+      entityType: 'workflow',
+      title: name,
+      description: description || '',
+      content: { steps: config.steps, config }, // Store workflow config as JSONB
+      tags: tags || [],
+      metadata: {
+        status: status || 'draft',
+        category: category || 'general',
+        is_public: is_public || false
+      },
+      visibility: (is_public || false) ? 'public' : 'private',
+      status: 'published'
+    });
+
+    // Log event
+    await logEvent({
+      tenantId,
+      eventType: 'entity.created',
+      aggregateType: 'entity',
+      aggregateId: entity.id,
+      actorId: userId,
+      payload: { entityType: 'workflow', status: status || 'draft', category: category || 'general' }
+    });
+
+    // Map to old format for compatibility
+    const workflow = mapEntityToWorkflow(entity);
 
     return res.status(201).json(success({
       workflow,
@@ -398,73 +426,66 @@ router.get('/', async (req, res) => {
 
     let queryText = `
       SELECT
-        w.*,
-        (
-          SELECT COUNT(*)::INTEGER
-          FROM workflow_executions we
-          WHERE we.workflow_id = w.id
-        ) as total_executions,
-        (
-          SELECT json_agg(
-            json_build_object(
-              'id', we.id,
-              'status', we.status,
-              'started_at', we.started_at,
-              'completed_at', we.completed_at,
-              'duration_ms', we.duration_ms
-            )
-            ORDER BY we.created_at DESC
-          )
-          FROM (
-            SELECT *
-            FROM workflow_executions we2
-            WHERE we2.workflow_id = w.id
-            ORDER BY we2.created_at DESC
-            LIMIT 5
-          ) we
-        ) as recent_executions
-      FROM workflows w
-      WHERE (w.user_id = $1 ${include_public === 'true' ? 'OR w.is_public = true' : ''})
+        e.*,
+        COALESCE(es.usage_last_30d, 0) as total_executions
+      FROM entity e
+      LEFT JOIN entity_stats es ON e.id = es.entity_id
+      WHERE e.entity_type = 'workflow'
+        AND e.valid_to IS NULL
+        AND e.deleted_at IS NULL
+        AND (e.owner_id = $1 ${include_public === 'true' ? 'OR e.visibility = \'public\'' : ''})
     `;
 
     const params = [userId];
     let paramIndex = 2;
 
     if (statusFilter) {
-      queryText += ` AND w.status = $${paramIndex}`;
+      queryText += ` AND e.metadata->>'status' = $${paramIndex}`;
       params.push(statusFilter);
       paramIndex++;
     }
 
     if (category) {
-      queryText += ` AND w.category = $${paramIndex}`;
+      queryText += ` AND e.metadata->>'category' = $${paramIndex}`;
       params.push(category);
       paramIndex++;
     }
 
     if (search) {
-      queryText += ` AND (w.name ILIKE $${paramIndex} OR w.description ILIKE $${paramIndex})`;
+      queryText += ` AND (e.title ILIKE $${paramIndex} OR e.description ILIKE $${paramIndex})`;
       params.push(`%${search}%`);
       paramIndex++;
     }
 
-    queryText += ` ORDER BY w.updated_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    queryText += ` ORDER BY e.updated_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
     params.push(parseInt(limit), parseInt(offset));
 
-    const result = await query(queryText, params);
+    const result = await db.query(queryText, params);
 
     // Get total count
-    const countResult = await query(
-      `SELECT COUNT(*) as total
-       FROM workflows w
-       WHERE w.user_id = $1 ${statusFilter ? 'AND w.status = $2' : ''}`,
-      statusFilter ? [userId, statusFilter] : [userId]
-    );
+    const countParams = [userId];
+    let countQuery = `
+      SELECT COUNT(*) as total
+      FROM entity e
+      WHERE e.entity_type = 'workflow'
+        AND e.valid_to IS NULL
+        AND e.deleted_at IS NULL
+        AND e.owner_id = $1
+    `;
 
+    if (statusFilter) {
+      countQuery += ` AND e.metadata->>'status' = $2`;
+      countParams.push(statusFilter);
+    }
+
+    const countResult = await db.query(countQuery, countParams);
     const total = parseInt(countResult.rows[0].total);
 
+    // Map entities to old format
+    const workflows = result.rows.map(entity => mapEntityToWorkflow(entity));
+
     return res.json(success({
-      workflows: result.rows,
+      workflows,
       pagination: {
         total,
         limit: parseInt(limit),
@@ -495,9 +516,11 @@ router.get('/:id', async (req, res) => {
       );
     }
 
-    // Get workflow with steps
-    const result = await query(
-      `SELECT * FROM get_workflow_with_steps($1)`,
+    // Get workflow entity
+    const result = await db.query(
+      `SELECT * FROM entity
+       WHERE id = $1 AND entity_type = 'workflow'
+         AND valid_to IS NULL AND deleted_at IS NULL`,
       [id]
     );
 
@@ -505,7 +528,9 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json(error('Workflow not found'));
     }
 
-    const { workflow, steps } = result.rows[0];
+    const entity = result.rows[0];
+    const workflow = mapEntityToWorkflow(entity);
+    const steps = entity.content?.steps || [];
 
     return res.json(success({
       workflow,
@@ -540,6 +565,12 @@ router.put('/:id', async (req, res) => {
       return res.status(403).json(error('Cannot edit public workflows you don\'t own'));
     }
 
+    // Get current entity
+    const current = await getCurrentEntity(id);
+    if (!current || current.owner_id !== userId || current.entity_type !== 'workflow') {
+      return res.status(404).json(error('Workflow not found'));
+    }
+
     // Validate config if provided
     if (config) {
       const validation = validateWorkflowConfig(config);
@@ -548,71 +579,51 @@ router.put('/:id', async (req, res) => {
       }
     }
 
-    // Build update query dynamically
-    const updates = [];
-    const values = [id];
-    let paramIndex = 2;
+    // Build updates object
+    const updates = {};
+    if (name !== undefined) updates.title = name.trim();
+    if (description !== undefined) updates.description = description;
+    if (config !== undefined) updates.content = { steps: config.steps, config };
+    if (tags !== undefined) updates.tags = tags;
 
-    if (name !== undefined) {
-      updates.push(`name = $${paramIndex}`);
-      values.push(name.trim());
-      paramIndex++;
+    // Update metadata
+    if (status !== undefined || is_public !== undefined || category !== undefined) {
+      updates.metadata = {
+        ...current.metadata,
+        ...(status !== undefined && { status }),
+        ...(category !== undefined && { category }),
+        ...(is_public !== undefined && { is_public })
+      };
     }
 
-    if (description !== undefined) {
-      updates.push(`description = $${paramIndex}`);
-      values.push(description);
-      paramIndex++;
-    }
-
-    if (config !== undefined) {
-      updates.push(`config = $${paramIndex}`);
-      values.push(JSON.stringify(config));
-      paramIndex++;
-    }
-
-    if (status !== undefined) {
-      updates.push(`status = $${paramIndex}`);
-      values.push(status);
-      paramIndex++;
-    }
-
+    // Update visibility if is_public changed
     if (is_public !== undefined) {
-      updates.push(`is_public = $${paramIndex}`);
-      values.push(is_public);
-      paramIndex++;
+      updates.visibility = is_public ? 'public' : 'private';
     }
 
-    if (category !== undefined) {
-      updates.push(`category = $${paramIndex}`);
-      values.push(category);
-      paramIndex++;
-    }
-
-    if (tags !== undefined) {
-      updates.push(`tags = $${paramIndex}`);
-      values.push(tags);
-      paramIndex++;
-    }
-
-    if (updates.length === 0) {
+    if (Object.keys(updates).length === 0) {
       return res.status(400).json(error('No fields to update'));
     }
 
-    const result = await query(
-      `UPDATE workflows
-       SET ${updates.join(', ')}
-       WHERE id = $1 AND user_id = $${paramIndex}
-       RETURNING *`,
-      [...values, userId]
-    );
+    // Update entity (creates new version)
+    const updated = await updateEntity(id, updates, userId);
 
-    if (result.rows.length === 0) {
-      return res.status(404).json(error('Workflow not found or access denied'));
-    }
+    // Log event
+    const tenantId = await ensureTenant(userId);
+    await logEvent({
+      tenantId,
+      eventType: 'entity.updated',
+      aggregateType: 'entity',
+      aggregateId: id,
+      actorId: userId,
+      payload: { entityType: 'workflow', fields: Object.keys(updates) }
+    });
+
+    // Map to old format
+    const workflow = mapEntityToWorkflow(updated);
 
     return res.json(success({
-      workflow: result.rows[0],
+      workflow,
       message: 'Workflow updated successfully',
     }));
   } catch (err) {
@@ -642,17 +653,25 @@ router.delete('/:id', async (req, res) => {
       return res.status(403).json(error('Cannot delete workflows you don\'t own'));
     }
 
-    // Delete workflow (cascade will delete steps and executions)
-    const result = await query(
-      `DELETE FROM workflows
-       WHERE id = $1 AND user_id = $2
-       RETURNING id`,
-      [id, userId]
-    );
-
-    if (result.rows.length === 0) {
+    // Get current entity
+    const current = await getCurrentEntity(id);
+    if (!current || current.owner_id !== userId || current.entity_type !== 'workflow') {
       return res.status(404).json(error('Workflow not found or access denied'));
     }
+
+    // Delete entity (soft delete)
+    await deleteEntity(id, userId);
+
+    // Log event
+    const tenantId = await ensureTenant(userId);
+    await logEvent({
+      tenantId,
+      eventType: 'entity.deleted',
+      aggregateType: 'entity',
+      aggregateId: id,
+      actorId: userId,
+      payload: { entityType: 'workflow', title: current.title }
+    });
 
     return res.json(success({
       message: 'Workflow deleted successfully',
@@ -682,9 +701,11 @@ router.post('/:id/execute', async (req, res) => {
       );
     }
 
-    // Get workflow
-    const workflowResult = await query(
-      `SELECT * FROM workflows WHERE id = $1`,
+    // Get workflow entity
+    const workflowResult = await db.query(
+      `SELECT * FROM entity
+       WHERE id = $1 AND entity_type = 'workflow'
+         AND valid_to IS NULL AND deleted_at IS NULL`,
       [id]
     );
 
@@ -692,27 +713,20 @@ router.post('/:id/execute', async (req, res) => {
       return res.status(404).json(error('Workflow not found'));
     }
 
-    const workflow = workflowResult.rows[0];
-    const config = workflow.config;
+    const entity = workflowResult.rows[0];
+    const config = entity.content?.config || {};
+    const steps = entity.content?.steps || [];
 
-    // Create execution record
-    const executionResult = await query(
-      `INSERT INTO workflow_executions (
-        workflow_id, user_id, input_variables, status
-      ) VALUES ($1, $2, $3, $4)
-      RETURNING *`,
-      [id, userId, JSON.stringify(variables), 'running']
-    );
-
-    const execution = executionResult.rows[0];
-    const executionId = execution.id;
+    // Generate execution ID for tracking
+    const executionId = `exec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const startTime = Date.now();
 
     // Execute workflow steps
     const stepResults = [];
     const context = {
       workflow: {
-        id: workflow.id,
-        name: workflow.name,
+        id: entity.id,
+        name: entity.title,
         input: variables,
       },
     };
@@ -723,7 +737,7 @@ router.post('/:id/execute', async (req, res) => {
     let errorStack = null;
 
     try {
-      for (const step of config.steps) {
+      for (const step of steps) {
         console.log(`Executing step: ${step.id} (${step.type})`);
 
         const stepResult = await executeStep(step, context, userId);
@@ -756,7 +770,7 @@ router.post('/:id/execute', async (req, res) => {
         }
 
         // Check if this is the last step
-        if (config.steps.indexOf(step) === config.steps.length - 1) {
+        if (steps.indexOf(step) === steps.length - 1) {
           finalOutput = stepResult.output;
         }
       }
@@ -767,32 +781,61 @@ router.post('/:id/execute', async (req, res) => {
       errorStack = err.stack;
     }
 
-    // Update execution record
+    // Record completion time
     const completedAt = new Date();
-    const durationMs = completedAt - new Date(execution.started_at);
+    const durationMs = completedAt - startTime;
 
-    await query(
-      `UPDATE workflow_executions
-       SET
-         status = $1,
-         results = $2,
-         final_output = $3,
-         error_message = $4,
-         error_stack = $5,
-         completed_at = $6,
-         duration_ms = $7
-       WHERE id = $8`,
+    // Get tenant for event logging
+    const tenantId = await ensureTenant(userId);
+
+    // Log execution event to usage_event table
+    await db.query(
+      `INSERT INTO usage_event (
+        tenant_id, user_id, entity_id, event_type, event_date,
+        metadata, duration_ms
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
-        executionStatus,
-        JSON.stringify({ steps: stepResults }),
-        finalOutput,
-        errorMessage,
-        errorStack,
+        tenantId,
+        userId,
+        id,
+        'workflow.executed',
         completedAt,
-        durationMs,
-        executionId,
+        JSON.stringify({
+          executionId,
+          status: executionStatus,
+          inputVariables: variables,
+          stepCount: steps.length,
+          completedSteps: stepResults.filter(r => r.status === 'completed').length,
+          error: errorMessage || null,
+          finalOutput: finalOutput || null
+        }),
+        durationMs
       ]
     );
+
+    // Track usage
+    await trackUsage({
+      tenantId,
+      userId,
+      entityId: id,
+      eventType: 'workflow.executed'
+    });
+
+    // Log event
+    await logEvent({
+      tenantId,
+      eventType: 'workflow.executed',
+      aggregateType: 'entity',
+      aggregateId: id,
+      actorId: userId,
+      payload: {
+        entityType: 'workflow',
+        executionId,
+        status: executionStatus,
+        durationMs,
+        stepCount: steps.length
+      }
+    });
 
     return res.json(success({
       executionId,
@@ -826,33 +869,47 @@ router.get('/:id/executions', async (req, res) => {
       );
     }
 
-    // Get executions
-    const result = await query(
+    // Get executions from usage_event table
+    const result = await db.query(
       `SELECT
         id,
-        workflow_id,
-        status,
-        started_at,
-        completed_at,
+        entity_id as workflow_id,
+        metadata->>'status' as status,
+        event_date as started_at,
+        event_date as completed_at,
         duration_ms,
-        error_message
-      FROM workflow_executions
-      WHERE workflow_id = $1
-      ORDER BY started_at DESC
+        metadata->>'error' as error_message,
+        metadata
+      FROM usage_event
+      WHERE entity_id = $1 AND event_type = 'workflow.executed'
+      ORDER BY event_date DESC
       LIMIT $2 OFFSET $3`,
       [id, parseInt(limit), parseInt(offset)]
     );
 
     // Get total count
-    const countResult = await query(
-      `SELECT COUNT(*) as total FROM workflow_executions WHERE workflow_id = $1`,
+    const countResult = await db.query(
+      `SELECT COUNT(*) as total FROM usage_event
+       WHERE entity_id = $1 AND event_type = 'workflow.executed'`,
       [id]
     );
 
     const total = parseInt(countResult.rows[0].total);
 
+    // Format execution records
+    const executions = result.rows.map(row => ({
+      id: row.id,
+      workflow_id: row.workflow_id,
+      status: row.status || 'completed',
+      started_at: row.started_at,
+      completed_at: row.completed_at,
+      duration_ms: row.duration_ms,
+      error_message: row.error_message,
+      metadata: row.metadata
+    }));
+
     return res.json(success({
-      executions: result.rows,
+      executions,
       pagination: {
         total,
         limit: parseInt(limit),
@@ -883,10 +940,10 @@ router.get('/:id/executions/:executionId', async (req, res) => {
       );
     }
 
-    // Get execution
-    const result = await query(
-      `SELECT * FROM workflow_executions
-       WHERE id = $1 AND workflow_id = $2`,
+    // Get execution from usage_event table
+    const result = await db.query(
+      `SELECT * FROM usage_event
+       WHERE id = $1 AND entity_id = $2 AND event_type = 'workflow.executed'`,
       [executionId, id]
     );
 
@@ -894,13 +951,53 @@ router.get('/:id/executions/:executionId', async (req, res) => {
       return res.status(404).json(error('Execution not found'));
     }
 
+    const row = result.rows[0];
+    const execution = {
+      id: row.id,
+      workflow_id: row.entity_id,
+      status: row.metadata?.status || 'completed',
+      started_at: row.event_date,
+      completed_at: row.event_date,
+      duration_ms: row.duration_ms,
+      metadata: row.metadata,
+      input_variables: row.metadata?.inputVariables || {},
+      final_output: row.metadata?.finalOutput || null,
+      error_message: row.metadata?.error || null
+    };
+
     return res.json(success({
-      execution: result.rows[0],
+      execution,
     }));
   } catch (err) {
     console.error('Error getting execution:', err);
     return res.status(500).json(error('Failed to get execution'));
   }
 });
+
+// ============================================================================
+// Helper Function: Map entity to workflow format (backward compatibility)
+// ============================================================================
+
+function mapEntityToWorkflow(entity) {
+  const metadata = entity.metadata || {};
+  const content = entity.content || {};
+
+  return {
+    id: entity.id,
+    name: entity.title,
+    description: entity.description,
+    config: content.config || { steps: content.steps || [] },
+    status: metadata.status || 'draft',
+    is_public: metadata.is_public || entity.visibility === 'public',
+    category: metadata.category || 'general',
+    tags: entity.tags || [],
+    user_id: entity.owner_id,
+    owner_id: entity.owner_id,
+    visibility: entity.visibility,
+    created_at: entity.created_at,
+    updated_at: entity.updated_at,
+    version: entity.version || 1
+  };
+}
 
 export default router;
