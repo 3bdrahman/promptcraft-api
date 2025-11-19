@@ -204,7 +204,7 @@ async function getTemplates(req, res) {
            COALESCE(fc.favorite_count, 0) as favorite_count,
            ${userId ? `CASE WHEN uf.user_id IS NOT NULL THEN true ELSE false END as user_favorited` : 'false as user_favorited'}
     FROM entity e
-    LEFT JOIN users u ON e.owner_id = u.id
+    LEFT JOIN "user" u ON e.owner_id = u.id
     LEFT JOIN (
       SELECT entity_id, COUNT(*)::int as favorite_count
       FROM favorite
@@ -378,7 +378,7 @@ async function getTemplates(req, res) {
       e.title ILIKE $${countParamCount} OR
       e.description ILIKE $${countParamCount} OR
       EXISTS(
-        SELECT 1 FROM users u
+        SELECT 1 FROM "user" u
         WHERE u.id = e.owner_id AND u.username ILIKE $${countParamCount}
       ) OR
       EXISTS(SELECT 1 FROM unnest(e.tags) as tag WHERE tag ILIKE $${countParamCount})
@@ -464,7 +464,7 @@ async function getUserTemplates(req, res) {
     const { limit = 50, offset = 0 } = req.query;
 
     // Get username for the authenticated user
-    const userResult = await db.query('SELECT username FROM users WHERE id = $1', [userId]);
+    const userResult = await db.query('SELECT username FROM "user" WHERE id = $1', [userId]);
     console.log('🔍 DEBUG getUserTemplates - userResult:', userResult.rows);
 
     if (userResult.rows.length === 0) {
@@ -482,7 +482,7 @@ async function getUserTemplates(req, res) {
              COALESCE(uf.favorite_count, 0) as favorite_count,
              false as user_favorited
       FROM entity e
-      JOIN users u ON e.owner_id = u.id
+      JOIN "user" u ON e.owner_id = u.id
       LEFT JOIN (
         SELECT entity_id, COUNT(*)::int as favorite_count
         FROM favorite
@@ -539,7 +539,7 @@ async function getTemplate(req, res, templateId) {
              (SELECT COUNT(*) FROM favorite f WHERE f.entity_id = e.id) as favorite_count,
              EXISTS(SELECT 1 FROM favorite f WHERE f.entity_id = e.id AND f.user_id = $2) as user_favorited
       FROM entity e
-      LEFT JOIN users u ON e.owner_id = u.id
+      LEFT JOIN "user" u ON e.owner_id = u.id
       WHERE e.id = $1
         AND e.entity_type = 'template'
         AND (e.visibility = 'public' OR e.owner_id = $2)
@@ -556,7 +556,7 @@ async function getTemplate(req, res, templateId) {
              (SELECT COUNT(*) FROM favorite f WHERE f.entity_id = e.id) as favorite_count,
              false as user_favorited
       FROM entity e
-      LEFT JOIN users u ON e.owner_id = u.id
+      LEFT JOIN "user" u ON e.owner_id = u.id
       WHERE e.id = $1
         AND e.entity_type = 'template'
         AND e.visibility = 'public'
@@ -619,7 +619,7 @@ async function getUserFavorites(req, res) {
            (SELECT COUNT(*) FROM favorite f2 WHERE f2.entity_id = e.id) as favorite_count
     FROM favorite f
     JOIN entity e ON f.entity_id = e.id
-    LEFT JOIN users u ON e.owner_id = u.id
+    LEFT JOIN "user" u ON e.owner_id = u.id
     WHERE f.user_id = $1
       AND e.entity_type = 'template'
       AND e.visibility = 'public'
@@ -1060,7 +1060,7 @@ async function getTeamTemplates(req, res, teamId) {
              COALESCE(fc.favorite_count, 0) as favorite_count,
              CASE WHEN f.user_id IS NOT NULL THEN true ELSE false END as user_favorited
       FROM entity e
-      LEFT JOIN users u ON e.owner_id = u.id
+      LEFT JOIN "user" u ON e.owner_id = u.id
       LEFT JOIN (
         SELECT entity_id, COUNT(*)::int as favorite_count
         FROM favorite
