@@ -198,13 +198,14 @@ export default async function handler(req, res) {
     // STORE REFRESH TOKEN
     // ============================================================
 
-    const tokenHash = hashToken(tokens.refreshToken);
+    const accessTokenHash = hashToken(tokens.accessToken);
+    const refreshTokenHash = hashToken(tokens.refreshToken);
     const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
 
     await client.query(
-      `INSERT INTO session (user_id, refresh_token, device_info, ip_address, user_agent, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [user.id, tokenHash, device_info, ipAddress, userAgent, refreshExpiresAt]
+      `INSERT INTO session (user_id, access_token, refresh_token, device_info, ip_address, user_agent, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [user.id, accessTokenHash, refreshTokenHash, device_info, ipAddress, userAgent, refreshExpiresAt]
     );
 
     // ============================================================

@@ -17,11 +17,14 @@ psql $DATABASE_URL -f schema/enterprise-schema.sql
 ```
 
 ### Option 2: Patch Existing Database
-If you need to keep existing data:
+If you need to keep existing data, apply ALL patches:
 
 ```bash
 # Apply authentication columns patch
 psql $DATABASE_URL -f schema/auth-columns-patch.sql
+
+# Apply session device_info column patch
+psql $DATABASE_URL -f schema/session-device-info-patch.sql
 ```
 
 ## ✅ Verification
