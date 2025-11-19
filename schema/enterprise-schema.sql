@@ -80,6 +80,22 @@ CREATE INDEX idx_session_user ON session(user_id) WHERE revoked_at IS NULL;
 CREATE INDEX idx_session_expires ON session(expires_at);
 CREATE INDEX idx_session_access_token ON session(access_token);
 
+-- Email verification pins for new user registration
+CREATE TABLE email_verification_pins (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  pin VARCHAR(6) NOT NULL,
+  email VARCHAR(255) NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  verified BOOLEAN DEFAULT FALSE,
+  attempts INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_email_verification_user ON email_verification_pins(user_id);
+CREATE INDEX idx_email_verification_email ON email_verification_pins(email);
+CREATE INDEX idx_email_verification_expires ON email_verification_pins(expires_at);
+
 -- ============================================================================
 -- CORE ENTITY SYSTEM (Temporal Versioning)
 -- ============================================================================
