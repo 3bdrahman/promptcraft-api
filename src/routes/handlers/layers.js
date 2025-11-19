@@ -216,15 +216,25 @@ export default async function handler(req, res) {
         is_template = false
       } = req.body;
 
+      console.log('🔍 [CREATE LAYER] Received request body:', JSON.stringify(req.body, null, 2));
+
       // Validation
       if (!name || !content || !layer_type) {
+        console.log('❌ [CREATE LAYER] Validation failed:', {
+          hasName: !!name,
+          hasContent: !!content,
+          hasLayerType: !!layer_type
+        });
         return res.status(400).json(error('Name, content, and layer_type are required'));
       }
 
       const validTypes = ['profile', 'project', 'task', 'snippet', 'adhoc'];
       if (!validTypes.includes(layer_type)) {
+        console.log('❌ [CREATE LAYER] Invalid layer_type:', layer_type);
         return res.status(400).json(error(`Invalid layer_type. Must be one of: ${validTypes.join(', ')}`));
       }
+
+      console.log('✅ [CREATE LAYER] Validation passed, creating entity...');
 
       // Check subscription limits
       const limitCheck = await checkLayerLimit(userId, tenantId);
