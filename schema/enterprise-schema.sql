@@ -354,6 +354,36 @@ CREATE INDEX idx_suggestion_entity ON suggestion(suggested_entity_id);
 CREATE INDEX idx_suggestion_score ON suggestion(score DESC);
 
 -- ============================================================================
+-- CONVERSATIONAL CONTEXT BUILDER
+-- ============================================================================
+
+-- Conversation sessions for AI-assisted context building
+CREATE TABLE conversation_sessions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  status VARCHAR(50) NOT NULL DEFAULT 'active', -- active, completed, abandoned
+  metadata JSONB DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_conversation_sessions_user ON conversation_sessions(user_id);
+CREATE INDEX idx_conversation_sessions_status ON conversation_sessions(status);
+
+-- Messages in a conversation
+CREATE TABLE conversation_messages (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  session_id UUID NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+  role VARCHAR(50) NOT NULL, -- 'user' or 'assistant'
+  content TEXT NOT NULL,
+  contexts_generated JSONB DEFAULT '[]',
+  timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_conversation_messages_session ON conversation_messages(session_id);
+CREATE INDEX idx_conversation_messages_timestamp ON conversation_messages(timestamp);
+
+-- ============================================================================
 -- READ MODEL (CQRS - Materialized Views)
 -- ============================================================================
 
