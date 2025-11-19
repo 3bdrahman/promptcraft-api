@@ -68,6 +68,7 @@ CREATE TABLE session (
   user_id UUID NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
   access_token VARCHAR(512) NOT NULL,
   refresh_token VARCHAR(512) NOT NULL,
+  device_info TEXT,
   expires_at TIMESTAMPTZ NOT NULL,
   revoked_at TIMESTAMPTZ,
   ip_address INET,
