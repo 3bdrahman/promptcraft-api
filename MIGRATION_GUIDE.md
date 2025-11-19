@@ -212,8 +212,11 @@ This creates:
 
 The following handlers still need to be updated to use the new schema:
 
+### ✅ Completed
+- [x] `src/routes/handlers/auth/*.js` - ✅ Updated to use new `session` table and event sourcing
+- [x] `src/routes/handlers/user.js` - ✅ Updated for new user table with event logging
+
 ### High Priority
-- [ ] `src/routes/handlers/auth/*.js` - Update to use new `session` table
 - [ ] `src/routes/handlers/contexts/composition.js` - Use `relationship` table
 - [ ] `src/routes/handlers/contexts/relationships.js` - Use `relationship` table
 - [ ] `src/routes/handlers/contexts/versions.js` - Use temporal versioning
@@ -230,7 +233,6 @@ The following handlers still need to be updated to use the new schema:
 - [ ] `src/routes/handlers/contexts/ai_recommendations.js` - Use entity_stats view
 
 ### Low Priority
-- [ ] `src/routes/handlers/user.js` - Update for new user table
 - [ ] `src/routes/handlers/profiles.js` - Update for new user table
 - [ ] `src/routes/handlers/embeddings/queue.js` - Use unified embedding table
 
@@ -333,7 +335,16 @@ For questions about this migration:
 
 ## Change Log
 
-### 2025-01-19
+### 2025-01-19 (Latest)
+- ✅ Updated all 7 authentication handlers (login, signup, verify-pin, logout, logout-all, refresh, resend-pin)
+- ✅ Migrated from `users` → `"user"` table
+- ✅ Migrated from `refresh_tokens` → `session` table
+- ✅ Replaced audit_logs with event sourcing via logEvent()
+- ✅ Updated user.js handler for profile management
+- ✅ Added event logging for all auth operations (user.login, user.logout, user.signup, etc.)
+- ✅ Implemented multi-tenancy support in auth flow via ensureTenant()
+
+### 2025-01-19 (Initial)
 - ✅ Created enterprise schema (enterprise-schema.sql)
 - ✅ Updated database.js with helper functions
 - ✅ Migrated layers.js (contexts)
