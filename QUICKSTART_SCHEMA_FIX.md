@@ -20,7 +20,7 @@ psql $DATABASE_URL -f schema/enterprise-schema.sql
 If you need to keep existing data:
 
 ```bash
-# Apply just the authentication columns patch
+# Apply authentication columns patch
 psql $DATABASE_URL -f schema/auth-columns-patch.sql
 ```
 
