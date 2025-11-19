@@ -31,17 +31,32 @@ CREATE TABLE "user" (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   tenant_id UUID NOT NULL REFERENCES tenant(id) ON DELETE CASCADE,
   email VARCHAR(255) NOT NULL,
+  username VARCHAR(255),
   name VARCHAR(255),
   avatar_url TEXT,
+
+  -- Password authentication
+  password_hash VARCHAR(255),
+  email_verified BOOLEAN DEFAULT FALSE,
+  failed_login_attempts INTEGER DEFAULT 0,
+  locked_until TIMESTAMPTZ,
+  last_login_at TIMESTAMPTZ,
+
+  -- OAuth authentication
   oauth_provider VARCHAR(50),
   oauth_id VARCHAR(255),
+
   settings JSONB DEFAULT '{}',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE(tenant_id, email)
+
+  UNIQUE(tenant_id, email),
+  UNIQUE(tenant_id, username)
 );
 
 CREATE INDEX idx_user_tenant ON "user"(tenant_id);
+CREATE INDEX idx_user_username ON "user"(username);
+CREATE INDEX idx_user_email_verified ON "user"(email_verified);
 CREATE INDEX idx_user_oauth ON "user"(oauth_provider, oauth_id);
 
 -- ============================================================================

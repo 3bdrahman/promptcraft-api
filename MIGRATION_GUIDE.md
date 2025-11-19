@@ -194,11 +194,12 @@ All updated handlers maintain backward compatibility by:
 
 ## Database Schema Setup
 
-To use the new schema, apply the enterprise schema:
+### For New Deployments
 
-```sql
--- Run the enterprise schema
-\i schema/enterprise-schema.sql
+Apply the complete enterprise schema (includes all auth columns):
+
+```bash
+psql $DATABASE_URL -f schema/enterprise-schema.sql
 ```
 
 This creates:
@@ -207,6 +208,25 @@ This creates:
 - Materialized views (entity_stats, tenant_usage_summary)
 - Helper functions (search_similar_entities, get_entity_history, get_entity_graph)
 - Indexes for performance
+- Authentication columns (username, password_hash, email_verified, etc.)
+
+### For Existing Deployments (IMPORTANT!)
+
+If you already applied the enterprise schema before the auth columns were added, run this patch:
+
+```bash
+psql $DATABASE_URL -f schema/auth-columns-patch.sql
+```
+
+This adds the missing authentication columns:
+- `username` - User login name
+- `password_hash` - Bcrypt password hash
+- `email_verified` - Email verification status
+- `failed_login_attempts` - Login rate limiting
+- `locked_until` - Account lockout timestamp
+- `last_login_at` - Last login tracking
+
+**The patch is safe to run multiple times** (uses `IF NOT EXISTS`).
 
 ## Remaining Work
 
@@ -335,7 +355,14 @@ For questions about this migration:
 
 ## Change Log
 
-### 2025-01-19 (Latest)
+### 2025-01-19 (Latest - Schema Fix)
+- 🔧 **CRITICAL FIX**: Added missing password authentication columns to user table
+- ✅ Updated enterprise-schema.sql to include username, password_hash, email_verified, etc.
+- ✅ Created auth-columns-patch.sql for existing deployments
+- ✅ Added SCHEMA_FIX_REQUIRED.md with migration instructions
+- ✅ Fixed "column username does not exist" error
+
+### 2025-01-19 (Auth Handlers)
 - ✅ Updated all 7 authentication handlers (login, signup, verify-pin, logout, logout-all, refresh, resend-pin)
 - ✅ Migrated from `users` → `"user"` table
 - ✅ Migrated from `refresh_tokens` → `session` table
