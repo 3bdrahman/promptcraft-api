@@ -69,46 +69,60 @@ export default async function handler(req, res) {
     // CHECK EXISTING USER
     // ============================================================
 
-    const existingUser = await db.query(
-      'SELECT id, email, username FROM "user" WHERE email = $1 OR username = $2',
-      [email.toLowerCase(), username]
+    // Check for existing email (emails must be unique globally)
+    const existingEmail = await db.query(
+      'SELECT id FROM "user" WHERE email = $1',
+      [email.toLowerCase()]
     );
 
-    if (existingUser.rows.length > 0) {
-      const existing = existingUser.rows[0];
+    if (existingEmail.rows.length > 0) {
+      return res.status(409).json(createError('Email already registered', 409));
+    }
 
-      if (existing.email.toLowerCase() === email.toLowerCase()) {
-        return res.status(409).json(createError('Email already registered', 409));
-      }
+    // Check for existing username (usernames are globally unique for simplicity)
+    const existingUsername = await db.query(
+      'SELECT id FROM "user" WHERE username = $1',
+      [username]
+    );
 
-      if (existing.username === username) {
-        return res.status(409).json(createError('Username already taken', 409));
-      }
+    if (existingUsername.rows.length > 0) {
+      return res.status(409).json(createError('Username already taken', 409));
     }
 
     // ============================================================
-    // CREATE USER
+    // CREATE TENANT & USER
     // ============================================================
 
     // Hash password
     const passwordHash = await hashPassword(password);
 
-    // Insert user
+    // Create tenant first
+    const tenantResult = await db.query(
+      `INSERT INTO tenant (name, slug, settings)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [`${username}'s Workspace`, `user-${username}-${Date.now()}`, {}]
+    );
+
+    const tenantId = tenantResult.rows[0].id;
+
+    // Insert user with tenant_id
     const result = await db.query(
       `INSERT INTO "user" (
+        tenant_id,
         email,
         username,
         password_hash,
         email_verified,
         created_at
-      ) VALUES ($1, $2, $3, $4, NOW())
+      ) VALUES ($1, $2, $3, $4, $5, NOW())
       RETURNING id, email, username, email_verified, created_at`,
-      [email.toLowerCase(), username, passwordHash, false]
+      [tenantId, email.toLowerCase(), username, passwordHash, false]
     );
 
     const user = result.rows[0];
 
-    console.log(`✅ User created: ${email} with ID: ${user.id}`);
+    console.log(`✅ User created: ${email} with ID: ${user.id}, tenant: ${tenantId}`);
 
     // ============================================================
     // EMAIL VERIFICATION - 6-Digit PIN
@@ -139,7 +153,7 @@ export default async function handler(req, res) {
     // AUDIT LOG
     // ============================================================
 
-    const tenantId = await ensureTenant(user.id);
+    // Log signup event (tenant already created above)
     await logEvent({
       tenantId,
       eventType: 'user.signup',
