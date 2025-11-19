@@ -18,7 +18,7 @@ function getSecrets() {
   return { JWT_SECRET, JWT_REFRESH_SECRET };
 }
 
-const ACCESS_TOKEN_EXPIRY = process.env.ACCESS_TOKEN_EXPIRY || '30m';
+const ACCESS_TOKEN_EXPIRY = process.env.ACCESS_TOKEN_EXPIRY || '7d'; // 7 days for better UX
 const REFRESH_TOKEN_EXPIRY = process.env.REFRESH_TOKEN_EXPIRY || '30d';
 
 /**
